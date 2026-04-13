@@ -40,15 +40,15 @@ cef_impl!(
             if command_id == COPY_MAGNET_LINK_COMMAND_ID {
                 if let Some(params) = params {
                     let link_url = CefString::from(&params.link_url()).to_string();
-                    if !link_url.is_empty() {
-                        gtk::glib::idle_add(move || {
-                            use gtk::prelude::ClipboardExt;
-                            let atom = gtk::gdk::Atom::intern("CLIPBOARD", false);
-                            let clipboard = gtk::Clipboard::get(&atom);
-                            clipboard.set_text(&link_url);
-                            gtk::glib::ControlFlow::Break
-                        });
-                    }
+                    gtk::glib::idle_add(move || {
+                        use gtk::prelude::ClipboardExt;
+                        let atom = gtk::gdk::Atom::intern("CLIPBOARD", false);
+                        let clipboard = gtk::Clipboard::get(&atom);
+                        if !clipboard.set_text(&link_url) {
+                            tracing::warn!("Failed to copy magnet link to clipboard");
+                        }
+                        gtk::glib::ControlFlow::Break
+                    });
                 }
                 return 1;
             }
