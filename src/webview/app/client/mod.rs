@@ -1,3 +1,4 @@
+mod context_menu_handler;
 mod display_handler;
 mod keyboard_handler;
 mod lifespan_handler;
@@ -6,6 +7,7 @@ mod render_handler;
 
 use std::os::raw::c_int;
 
+use context_menu_handler::WebViewContextMenuHandler;
 use display_handler::WebViewDisplayHandler;
 use lifespan_handler::WebViewLifeSpanHandler;
 use load_handler::WebViewLoadHandler;
@@ -25,6 +27,10 @@ cef_impl!(
     name = Client,
     sys_type = cef_dll_sys::cef_client_t,
     {
+        fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
+            Some(WebViewContextMenuHandler::new())
+        }
+
         fn display_handler(&self) -> Option<DisplayHandler> {
             Some(WebViewDisplayHandler::new())
         }
