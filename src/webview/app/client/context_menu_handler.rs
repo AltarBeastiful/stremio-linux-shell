@@ -41,12 +41,9 @@ cef_impl!(
                 if let Some(params) = params {
                     let link_url = CefString::from(&params.link_url()).to_string();
                     gtk::glib::idle_add(move || {
-                        use gtk::prelude::ClipboardExt;
-                        let atom = gtk::gdk::Atom::intern("CLIPBOARD", false);
+                        let atom = gtk::gdk::Atom::intern("CLIPBOARD");
                         let clipboard = gtk::Clipboard::get(&atom);
-                        if !clipboard.set_text(&link_url) {
-                            tracing::warn!("Failed to copy magnet link to clipboard");
-                        }
+                        clipboard.set_text(&link_url);
                         gtk::glib::ControlFlow::Break
                     });
                 }
