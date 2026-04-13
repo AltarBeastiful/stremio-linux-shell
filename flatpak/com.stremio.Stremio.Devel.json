@@ -10,7 +10,8 @@
         "org.freedesktop.Platform.ffmpeg-full": {
             "version": "24.08",
             "directory": "lib/ffmpeg",
-            "add-ld-path": "."
+            "add-ld-path": ".",
+            "autodownload": true
         },
         "org.freedesktop.Platform.VAAPI.Intel": {
             "version": "24.08",
