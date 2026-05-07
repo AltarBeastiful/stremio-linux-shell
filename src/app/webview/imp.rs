@@ -35,11 +35,9 @@ impl ObjectImpl for WebView {
             settings.set_enable_media_capabilities(false);
             settings.set_enable_media_stream(false);
             settings.set_enable_webaudio(false);
+            settings.set_enable_write_console_messages_to_stdout(true);
         }
 
-        // Suppress the native WebKitGTK context menu so that the React app's
-        // own right-click popup (which contains the Preload option) can appear.
-        self.webview.connect_context_menu(|_, _, _| true);
         let gesture = GestureClick::new();
         gesture.set_button(0);
         gesture.connect_pressed(clone!(

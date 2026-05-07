@@ -48,6 +48,10 @@ impl Server {
             Command::new(self.file.as_os_str())
         };
 
+        if let std::result::Result::Ok(web_path) = env::var("WEB_PATH") {
+            cmd.env("WEB_PATH", web_path);
+        }
+
         let mut child = cmd
             .env("NO_CORS", (dev as i32).to_string())
             .env("SERVER_IPC_KEY", IPC_KEY)
