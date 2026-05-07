@@ -32,6 +32,10 @@ impl ObjectImpl for WebView {
             settings.set_enable_webaudio(false);
         }
 
+        // Suppress the native WebKitGTK context menu so that the React app's
+        // own right-click popup (which contains the Preload option) can appear.
+        self.webview.connect_context_menu(|_, _, _| true);
+
         object.append(&self.webview);
     }
 }
