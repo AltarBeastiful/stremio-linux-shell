@@ -54,7 +54,13 @@ globalThis.chrome = {
 };
 
 window.ipc.addEventListener('message', (message) => {
-    window.qt.webChannelTransport.onmessage(message);
+    // Guard: onmessage is set by ShellTransport after the Qt web-channel
+    // handshake.  Messages arriving before the handshake (e.g. the first
+    // window-visibility signal) must be silently dropped rather than
+    // throwing "TypeError: undefined is not a function".
+    if (typeof window.qt?.webChannelTransport?.onmessage === 'function') {
+        window.qt.webChannelTransport.onmessage(message);
+    }
 });
 
 console.log('IPC script injected');
