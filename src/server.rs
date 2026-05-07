@@ -28,7 +28,27 @@ impl Server {
     }
 
     pub fn start(&mut self, dev: bool) -> anyhow::Result<()> {
-        let mut child = Command::new("node")
+        // If a server is already listening on the port, nothing to do.
+        if std::net::TcpStream::connect("127.0.0.1:11470").is_ok() {
+            tracing::info!("Server already running on port 11470, skipping start");
+            return Ok(());
+        }
+
+        let is_js = self
+            .file
+            .extension()
+            .map(|ext| ext == "js")
+            .unwrap_or(false);
+
+        let mut cmd = if is_js {
+            let mut c = Command::new("node");
+            c.arg(self.file.as_os_str());
+            c
+        } else {
+            Command::new(self.file.as_os_str())
+        };
+
+        let mut child = cmd
             .env("NO_CORS", (dev as i32).to_string())
             .env("SERVER_IPC_KEY", IPC_KEY)
             .arg(self.file.as_os_str())
