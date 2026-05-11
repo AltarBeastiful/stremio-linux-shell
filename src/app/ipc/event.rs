@@ -21,6 +21,7 @@ pub enum IpcEvent {
     Visibility(bool),
     OpenMedia(String),
     Mpv(IpcEventMpv),
+    Notification { title: String, body: String },
 }
 
 impl TryFrom<&str> for IpcEvent {

@@ -31,6 +31,13 @@ impl TryFrom<IpcMessageRequest> for IpcEvent {
                     match data {
                         Some(data) => match name {
                             "app-ready" => Ok(IpcEvent::Ready),
+                            "show-notification" => {
+                                #[derive(Deserialize)]
+                                struct NotifData { title: String, #[serde(default)] body: String }
+                                let nd: NotifData = serde_json::from_value(data)
+                                    .map_err(|_| "Invalid show-notification object")?;
+                                Ok(IpcEvent::Notification { title: nd.title, body: nd.body })
+                            }
                             "win-set-visibility" => {
                                 let data: IpcMessageRequestWinSetVisilibty =
                                     serde_json::from_value(data)

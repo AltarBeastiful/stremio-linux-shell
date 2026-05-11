@@ -144,6 +144,11 @@ impl ApplicationImpl for Application {
                         IpcEvent::Quit => {
                             app.quit();
                         }
+                        IpcEvent::Notification { title, body } => {
+                            let notif = gtk::gio::Notification::new(&title);
+                            notif.set_body(if body.is_empty() { None } else { Some(body.as_str()) });
+                            app.send_notification(Some("preload-complete"), &notif);
+                        }
                         IpcEvent::Mpv(event) => match event {
                             IpcEventMpv::Observe(name) => video.observe_mpv_property(name),
                             IpcEventMpv::Command((name, args)) => {
