@@ -23,6 +23,7 @@ pub enum IpcEvent {
     Mpv(IpcEventMpv),
     MediaMetadata((String, Option<String>, Option<String>)),
     MediaStatus(bool),
+    Notification { title: String, body: String },
 }
 
 impl TryFrom<&str> for IpcEvent {
