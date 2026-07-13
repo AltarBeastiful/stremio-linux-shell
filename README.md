@@ -56,3 +56,16 @@ flatpak install -y \
 flatpak install ./flatpak/com.stremio.Stremio.Devel.flatpak
 flatpak run com.stremio.Stremio.Devel
 ```
+
+#### Debian package (.deb)
+A `.deb` package is built and attached to every [release](https://github.com/Stremio/stremio-linux-shell/releases).
+The GTK, libadwaita and WebKitGTK runtime dependencies (`libgtk-4-1`, `libadwaita-1-0`,
+`libwebkitgtk-6.0-4`) are pinned explicitly in `[package.metadata.deb]`; the remaining transitive
+dependencies (`libmpv2`, `libc6`, etc.) are resolved from the libraries linked into the binary via
+`$auto`. See the comment in `Cargo.toml` for why the pinned ones cannot be left to `$auto`.
+
+```bash
+cargo install cargo-deb --locked
+cargo deb # produces target/debian/stremio_<version>_amd64.deb
+sudo apt install ./target/debian/stremio_*_amd64.deb
+```
