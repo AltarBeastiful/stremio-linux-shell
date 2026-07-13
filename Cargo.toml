@@ -49,12 +49,20 @@ Stremio is a modern media center that gives you the best experience for \
 discovering and watching video content: movies, TV series, YouTube, live \
 TV and more."""
 # `$auto` lets cargo-deb inspect the built binary's linked shared libraries
-# (via dpkg-shlibdeps) and generate the correct runtime package names and
-# minimum versions available on the target distribution, instead of hardcoding
-# package names such as `libgtk-4`/`libadwaita-1`/`libwebkitgtk-6.0` that don't
-# exist (the real runtime packages are `libgtk-4-1`, `libadwaita-1-0` and
-# `libwebkitgtk-6.0-4`).
-depends = "$auto, nodejs"
+# (via dpkg-shlibdeps) and generate runtime package names/minimum versions for
+# most transitive dependencies (libc, openssl, mpv, etc). However, in some
+# build environments (e.g. non-standard PKG_CONFIG_PATH, Flatpak/GNOME SDK
+# extensions on the PATH, or containers missing the exact -dev shlibs
+# metadata) dpkg-shlibdeps silently falls back to guessing a dependency name
+# from the shared library's SONAME instead of resolving the real package,
+# producing bogus/uninstallable names like `libgtk-4`, `libadwaita-1` and
+# `libwebkitgtk-6.0` (the real runtime packages are `libgtk-4-1`,
+# `libadwaita-1-0` and `libwebkitgtk-6.0-4`). To make the produced `.deb`
+# reliably installable regardless of the build environment, the GTK/Adwaita/
+# WebKit runtime deps are pinned explicitly here, with minimum versions
+# matching the `v4_22`/`v1_9`/`v2_52` feature flags requested above; `$auto`
+# is kept for the remaining transitive dependencies.
+depends = "libgtk-4-1 (>= 4.22), libadwaita-1-0 (>= 1.9), libwebkitgtk-6.0-4 (>= 2.52), $auto, nodejs"
 assets = [
     ["target/release/stremio-linux-shell", "/usr/libexec/stremio/stremio", "755"],
     ["data/server.js", "/usr/libexec/stremio/server.js", "644"],
