@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Use GSK OpenGL renderer for Nvidia cards
-if ls /dev/nvidia0 &>/dev/null 2>&1; then
+if [ -e /dev/nvidia0 ]; then
     export GSK_RENDERER=opengl
 fi
 
