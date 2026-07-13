@@ -63,13 +63,3 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ./flatpak/*.flatpak
-
-      - name: Install cargo-deb
-        run: cargo install cargo-deb --locked
-
-      - name: Build deb package
-        run: cargo deb
-      - name: Upload deb package to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ./target/debian/*.deb
