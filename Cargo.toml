@@ -41,3 +41,35 @@ base64 = "0.22.1"
 [build-dependencies]
 anyhow = "1.0.103"
 dirs = "6.0.0"
+
+[package.metadata.deb]
+name = "stremio"
+maintainer = "Stremio <support@stremio.com>"
+copyright = "2025, Stremio"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+Stremio is a modern media center that gives you the best experience for \
+discovering and watching video content: movies, TV series, YouTube, live \
+TV and more."""
+section = "video"
+priority = "optional"
+# `$auto` lets cargo-deb inspect the built binary's linked shared libraries
+# (via dpkg-shlibdeps) and generate the correct runtime package names and
+# minimum versions available on the target distribution, instead of hardcoding
+# package names such as `libgtk-4`/`libadwaita-1`/`libwebkitgtk-6.0` that do not
+# exist (the real runtime packages are `libgtk-4-1`, `libadwaita-1-0` and
+# `libwebkitgtk-6.0-4`).
+depends = "$auto, nodejs"
+maintainer-scripts = "packaging/deb"
+assets = [
+    ["target/release/stremio-linux-shell", "usr/libexec/stremio/stremio", "755"],
+    ["data/server.js", "usr/libexec/stremio/server.js", "644"],
+    ["packaging/deb/stremio.sh", "usr/bin/stremio", "755"],
+    ["data/com.stremio.Stremio.desktop", "usr/share/applications/com.stremio.Stremio.desktop", "644"],
+    ["data/com.stremio.Stremio.metainfo.xml", "usr/share/metainfo/com.stremio.Stremio.metainfo.xml", "644"],
+    ["data/com.stremio.Stremio.service", "usr/share/dbus-1/services/com.stremio.Stremio.service", "644"],
+    ["data/com.stremio.Stremio.gschema.xml", "usr/share/glib-2.0/schemas/com.stremio.Stremio.gschema.xml", "644"],
+    ["data/icons/com.stremio.Stremio.svg", "usr/share/icons/hicolor/scalable/apps/com.stremio.Stremio.svg", "644"],
+    ["po/es/LC_MESSAGES/stremio.mo", "usr/share/locale/es/LC_MESSAGES/stremio.mo", "644"],
+    ["po/fr/LC_MESSAGES/stremio.mo", "usr/share/locale/fr/LC_MESSAGES/stremio.mo", "644"],
+]
