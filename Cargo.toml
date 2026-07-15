@@ -11,16 +11,25 @@ edition = "2024"
 [features]
 default = ["ubuntu-resolute"]
 offline-build = []
-# GTK4/libadwaita/WebKitGTK API-version feature sets, one per supported Ubuntu
-# release. Pick the set matching the target's shipped runtime libraries with
-# `--no-default-features --features <set>`, e.g. for packaging on jammy:
-#   cargo build --no-default-features --features ubuntu-jammy
+# GTK4/libadwaita/WebKitGTK API-version feature sets, one per natively
+# supported Ubuntu release for the `.deb` build. Pick the set matching the
+# target's shipped runtime libraries with `--no-default-features --features
+# <set>`, e.g. for packaging on noble:
+#   cargo build --no-default-features --features ubuntu-noble
 # The versions below match what each release ships (checked against
 # `apt-cache policy libgtk-4-1 libadwaita-1-0 libwebkitgtk-6.0-4`):
-#   jammy (22.04 LTS):  GTK 4.6.9,  libadwaita 1.1.7, WebKitGTK 2.50.4
-#   noble (24.04 LTS):  GTK 4.14.5, libadwaita 1.5.0, WebKitGTK 2.52.3
-#   resolute (devel):   GTK 4.22.4, libadwaita 1.9.0, WebKitGTK 2.52.3
-ubuntu-jammy = ["gtk/v4_6", "gdk-wayland/v4_4", "adw/v1_1", "webkit/v2_50"]
+#   noble (24.04 LTS): GTK 4.14.5, libadwaita 1.5.0, WebKitGTK 2.52.3
+#   resolute (devel):  GTK 4.22.4, libadwaita 1.9.0, WebKitGTK 2.52.3
+# jammy (22.04 LTS) is NOT included here: it only ships GTK 4.6.9, but the
+# `webkit6` crate's generated bindings require GTK4 features >= v4_10
+# unconditionally (`gtk::Accessible` is referenced without a lower-version
+# cfg guard), so this crate cannot be built against jammy's system GTK4 at
+# all (`pkg-config` fails: "Requested 'gtk4 >= 4.10' but version of GTK is
+# 4.6.9"), regardless of which `v4_*`/`v1_*`/`v2_*` feature is selected, and
+# there is no verified official PPA backporting GTK4 4.10+ to jammy. jammy
+# (and any other older/unsupported release) is instead served via the
+# Flatpak package built by this same workflow, which bundles its own GNOME
+# runtime and is unaffected by the host's system library versions.
 ubuntu-noble = ["gtk/v4_14", "gdk-wayland/v4_12", "adw/v1_5", "webkit/v2_52"]
 ubuntu-resolute = ["gtk/v4_22", "gdk-wayland/v4_20", "adw/v1_9", "webkit/v2_52"]
 

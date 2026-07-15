@@ -58,13 +58,29 @@ flatpak run com.stremio.Stremio.Devel
 ```
 
 #### Debian package (.deb)
-A `.deb` package is built and attached to every [release](https://github.com/Stremio/stremio-linux-shell/releases).
-Runtime dependencies (`libgtk-4-1`, `libadwaita-1-0`, `libwebkitgtk-6.0-4`, `libmpv2`, etc.) are resolved
-automatically from the libraries linked into the binary, so they always match the package names available
-on the target distribution.
+A `.deb` package is built and attached to every [release](https://github.com/Stremio/stremio-linux-shell/releases),
+for each natively supported Ubuntu release:
+
+| Ubuntu release       | Codename   | Artifact suffix |
+|-----------------------|-----------|------------------|
+| 24.04 LTS             | `noble`   | `-noble.deb`     |
+| devel (pre-26.04 LTS) | `resolute`| `-resolute.deb`  |
+
+Each `.deb` is built inside a container matching its target release, so runtime dependencies
+(`libgtk-4-1`, `libadwaita-1-0`, `libwebkitgtk-6.0-4`, `libmpv2`, etc.) are resolved automatically from the
+libraries actually linked into that build, matching the package names and minimum versions available on
+that release. Install the `.deb` matching your Ubuntu version.
+
+22.04 LTS (`jammy`) is **not** built as a native `.deb`: it only ships GTK4 4.6.9, while the `webkit6` Rust
+bindings used by this project require GTK4 >= 4.10 to compile, and there is no verified PPA that backports a
+newer GTK4 to jammy. Users on jammy or any other unsupported release should use the Flatpak package instead,
+which bundles its own GNOME runtime and is unaffected by the host's system library versions.
+
+To build a `.deb` locally, pick the Cargo feature matching your distribution's GTK4/libadwaita/WebKitGTK
+versions (see `[features]` in `Cargo.toml`):
 
 ```bash
 cargo install cargo-deb --locked
-cargo deb # produces target/debian/stremio_<version>_amd64.deb
+cargo deb -- --no-default-features --features ubuntu-noble # or ubuntu-resolute
 sudo apt install ./target/debian/stremio_*_amd64.deb
 ```

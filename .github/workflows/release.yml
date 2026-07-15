@@ -8,17 +8,36 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # Build one .deb per natively supported Ubuntu release: the latest LTS
+  # (noble 24.04) plus the current development release heading towards the
+  # next LTS (resolute, pre-26.04). Each leg builds inside a container
+  # matching that release so the linked GTK/Adwaita/WebKitGTK libraries - and
+  # the dependency versions cargo-deb's `$auto` resolves via dpkg-shlibdeps -
+  # are correct for that target. The `cargo-feature` picks the matching
+  # GTK/Adwaita/WebKitGTK API-version feature set (see `[features]` in
+  # Cargo.toml). jammy (22.04 LTS) is intentionally excluded: its GTK4
+  # (4.6.9) is below the minimum the `webkit6` crate requires to compile
+  # (>= 4.10) and no verified PPA backports a newer GTK4 there; jammy users
+  # are served by the Flatpak package built later in this workflow instead.
+  build-deb:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - codename: noble
+            cargo-feature: ubuntu-noble
+          - codename: resolute
+            cargo-feature: ubuntu-resolute
     runs-on: ubuntu-latest
     container:
-      image: ubuntu:resolute
+      image: ubuntu:${{ matrix.codename }}
       options: --privileged
     steps:
       - name: Install dependencies
         run: |
           apt-get -y update
           apt-get -y install build-essential curl libssl-dev git \
-            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev libmpv-dev gettext nodejs flatpak-builder
+            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev libmpv-dev gettext nodejs
 
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -31,12 +50,77 @@ jobs:
       - name: Build deb package
         run: |
           cargo install cargo-deb --locked
-          cargo deb
+          cargo deb -- --no-default-features --features ${{ matrix.cargo-feature }}
 
-      - name: Upload deb package to release
+      - name: Rename deb artifact
+        run: |
+          for f in target/debian/*.deb; do
+            mv "$f" "${f%.deb}-${{ matrix.codename }}.deb"
+          done
+
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.codename }}
+          path: target/debian/*.deb
+
+  # Verify each .deb installs cleanly (correct, resolvable dependencies) on a
+  # fresh, unmodified container of the same Ubuntu release it was built for.
+  smoke-test-deb:
+    needs: build-deb
+    strategy:
+      fail-fast: false
+      matrix:
+        codename: [noble, resolute]
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:${{ matrix.codename }}
+    steps:
+      - name: Download deb artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: deb-${{ matrix.codename }}
+          path: dist
+
+      - name: Install deb package
+        run: |
+          apt-get -y update
+          apt-get -y install ./dist/*.deb
+
+  release-deb:
+    needs: smoke-test-deb
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all deb artifacts
+        uses: actions/download-artifact@v6
+        with:
+          pattern: deb-*
+          path: dist
+          merge-multiple: true
+
+      - name: Upload deb packages to release
         uses: softprops/action-gh-release@v2
         with:
-          files: ./target/debian/*.deb
+          files: ./dist/*.deb
+
+  flatpak:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:resolute
+      options: --privileged
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get -y update
+          apt-get -y install build-essential curl libssl-dev git flatpak-builder
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Rust setup
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Python setup
         uses: actions/setup-python@v5
