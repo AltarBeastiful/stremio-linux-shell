@@ -36,6 +36,18 @@ struct Args {
 }
 
 fn main() -> ExitCode {
+    // GTK 4.22 defaults to the Vulkan GSK renderer. Compositing our OpenGL video
+    // GLArea through the Vulkan renderer forces an expensive per-frame GL->Vulkan
+    // copy — on an AMD/Mesa laptop that alone was ~50% CPU during playback versus
+    // ~11% with the GL renderer, even with hardware decoding active. Prefer the
+    // GL renderer unless the user overrode it. Must be set before GTK initializes.
+    //
+    // SAFETY: this runs at the very start of main, before any other threads are
+    // spawned, so there is no concurrent access to the environment.
+    if env::var_os("GSK_RENDERER").is_none() {
+        unsafe { env::set_var("GSK_RENDERER", "ngl") };
+    }
+
     tracing_subscriber::fmt::init();
 
     let data_dir = dirs::data_dir()
