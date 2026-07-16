@@ -1,0 +1,50 @@
+# Build environment for the .deb of one Ubuntu release.
+#
+#   docker build -f packaging/Dockerfile.build --build-arg CODENAME=noble \
+#     -t stremio-deb-build:noble packaging/
+#
+# The build must happen on the release it targets: that is what lets cargo-deb's
+# `$auto` run dpkg-shlibdeps against the exact libraries this release ships, so
+# the generated Depends carry that release's real package names and version
+# floors. See packaging/README.md.
+#
+# Kept as an image (rather than apt-get inside a throwaway `docker run`) so the
+# dependency and toolchain layers cache. Without this, every local test run
+# re-downloads the toolchain before compiling anything.
+ARG CODENAME=noble
+FROM ubuntu:${CODENAME}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Build dependencies. Mirrors .github/workflows/build.yml, plus the packaging
+# tools. libwebkitgtk-6.0-dev is the one that constrains which releases are
+# targetable at all.
+RUN apt-get -qq update \
+ && apt-get -qq install -y --no-install-recommends \
+      build-essential \
+      curl \
+      ca-certificates \
+      git \
+      pkg-config \
+      libssl-dev \
+      libgtk-4-dev \
+      libadwaita-1-dev \
+      libwebkitgtk-6.0-dev \
+      libmpv-dev \
+      gettext \
+      nodejs \
+ && rm -rf /var/lib/apt/lists/*
+
+# Pinned rather than `stable` so a toolchain release cannot silently change the
+# output of a packaging run. Bump deliberately.
+ARG RUST_VERSION=stable
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
+      --default-toolchain ${RUST_VERSION}
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# cargo-deb lives in its own layer so it survives source changes. --locked keeps
+# its own dependency resolution reproducible.
+ARG CARGO_DEB_VERSION=3.7.0
+RUN cargo install cargo-deb --version ${CARGO_DEB_VERSION} --locked
+
+WORKDIR /build
