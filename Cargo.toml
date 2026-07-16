@@ -80,21 +80,30 @@ extended-description = """\
 Stremio is a modern media center that gives you the best experience for \
 discovering and watching video content: movies, TV series, YouTube, live \
 TV and more."""
-# `$auto` lets cargo-deb inspect the built binary's linked shared libraries
-# (via dpkg-shlibdeps) and generate runtime package names/minimum versions for
-# most transitive dependencies (libc, openssl, mpv, etc). However, in some
-# build environments (e.g. non-standard PKG_CONFIG_PATH, Flatpak/GNOME SDK
-# extensions on the PATH, or containers missing the exact -dev shlibs
-# metadata) dpkg-shlibdeps silently falls back to guessing a dependency name
-# from the shared library's SONAME instead of resolving the real package,
-# producing bogus/uninstallable names like `libgtk-4`, `libadwaita-1` and
-# `libwebkitgtk-6.0` (the real runtime packages are `libgtk-4-1`,
-# `libadwaita-1-0` and `libwebkitgtk-6.0-4`). To make the produced `.deb`
-# reliably installable regardless of the build environment, the GTK/Adwaita/
-# WebKit runtime deps are pinned explicitly here, with minimum versions
-# matching the `v4_22`/`v1_9`/`v2_52` feature flags requested above; `$auto`
-# is kept for the remaining transitive dependencies.
-depends = "libgtk-4-1 (>= 4.22), libadwaita-1-0 (>= 1.9), libwebkitgtk-6.0-4 (>= 2.52), $auto, nodejs"
+# Do not pin GTK/Adwaita/WebKit here. A pin is one value baked into the crate,
+# but a .deb is built per Ubuntu release (packaging/releases.json) and each
+# ships different versions, so any pin is wrong for every release but one:
+# `libgtk-4-1 (>= 4.22)` yields a package that cannot install on 24.04 at all.
+#
+# `$auto` derives names and floors from what the binary actually links, but is
+# only correct when the matching -dev packages are present: otherwise
+# dpkg-shlibdeps invents a name from the SONAME (`libgtk-4` instead of the real
+# `libgtk-4-1`) and the .deb builds cleanly and installs nowhere. That
+# precondition is enforced, not assumed — each .deb is built in a container of
+# its target release and must then install in a fresh one before it can ship
+# (packaging/verify-deb.sh, TEST 1 and TEST 2). See packaging/README.md.
+#
+# nodejs runs the bundled streaming server; it is not linked, so $auto is blind
+# to it.
+depends = "$auto, nodejs"
+
+# Also not linked, so also invisible to $auto. Both are driven by dpkg file
+# triggers: desktop-file-utils' update-desktop-database is what registers the
+# x-scheme-handler/stremio association from our .desktop, and without it
+# stremio:// links do not open the app. hicolor-icon-theme owns the icon cache
+# trigger (libgtk-4-1 already pulls it in). Recommends, not Depends: the app
+# runs without them, it just loses URL handling and icon caching.
+recommends = "desktop-file-utils, hicolor-icon-theme"
 assets = [
     ["target/release/stremio-linux-shell", "/usr/libexec/stremio/stremio", "755"],
     ["data/server.js", "/usr/libexec/stremio/server.js", "644"],
