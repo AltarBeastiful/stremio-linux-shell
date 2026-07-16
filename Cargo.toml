@@ -9,13 +9,43 @@ license = "GPL-3.0-only"
 edition = "2024"
 
 [features]
+# `default` is the newest API set we support, so a plain `cargo build` works for
+# developers on current Ubuntu and for the Flatpak (which builds with default
+# features against the GNOME 50 SDK). Packaging never relies on it: every .deb
+# build passes --no-default-features --features <set> explicitly.
+default = ["api-4_22"]
 offline-build = []
 
+# API-level sets, each pinning the GTK/libadwaita/WebKitGTK versions a build
+# targets. They are named after the API levels rather than after distributions
+# on purpose: the crate has no opinion about Ubuntu, and the Flatpak builds with
+# `default` and must not appear to depend on an Ubuntu release. The mapping from
+# a distribution release to one of these sets lives in packaging/releases.json,
+# which is also what drives the CI matrix. Several releases can share a set —
+# Ubuntu 26.10 (GTK 4.23) reuses api-4_22.
+#
+# Building with a higher set than a target ships compiles fine on a newer host
+# and then fails at runtime on that target, so a set must never exceed what the
+# release mapped to it provides. build.yml type-checks every set on each push.
+#
+# Verified against each release's archive on 2026-07-16:
+#   Ubuntu 24.04 LTS (noble)    GTK 4.14.5  libadwaita 1.5.0  WebKitGTK 2.52.3
+#   Ubuntu 26.04 LTS (resolute) GTK 4.22.4  libadwaita 1.9.0  WebKitGTK 2.52.3
+#
+# There is deliberately no set below api-4_14. The crate cannot be built against
+# GTK older than 4.10 at any API level: `webkit6` references `gtk::Accessible`
+# in its generated bindings with no version cfg guard, and that type requires
+# GTK feature v4_10+. This is what rules out Ubuntu 22.04 (GTK 4.6.9) — the
+# failure is inside the dependency, so no selection here avoids it. See
+# packaging/README.md.
+api-4_14 = ["gtk/v4_14", "gdk-wayland/v4_12", "adw/v1_5", "webkit/v2_52"]
+api-4_22 = ["gtk/v4_22", "gdk-wayland/v4_20", "adw/v1_9", "webkit/v2_52"]
+
 [dependencies]
-gtk = { package = "gtk4", version = "0.11.4", features = ["v4_22"] }
-gdk-wayland = { package = "gdk4-wayland", version = "0.11.4", features = ["v4_20", "wayland_crate"] }
-adw = { package = "libadwaita", version = "0.9.2", features = ["v1_9"] }
-webkit = { package = "webkit6", version = "0.6.1", features = ["v2_52"] }
+gtk = { package = "gtk4", version = "0.11.4" }
+gdk-wayland = { package = "gdk4-wayland", version = "0.11.4", features = ["wayland_crate"] }
+adw = { package = "libadwaita", version = "0.9.2" }
+webkit = { package = "webkit6", version = "0.6.1" }
 ashpd = { version = "0.13.12", features = ["background", "gtk4", "inhibit", "open_uri"] }
 ksni = "0.3.5"
 mpris-server = "0.10.0"
