@@ -8,17 +8,63 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # The .deb target list lives in packaging/releases.json, not here, so the CI
+  # matrix and the local harness (packaging/test-deb.sh) read the same source
+  # and cannot drift. Adding an Ubuntu release is one entry in that file.
+  # See packaging/README.md for which releases are targeted and why.
+  targets:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Fail here, before spending matrix minutes, if releases.json names a
+      # feature set that Cargo.toml does not define. Otherwise the mistake
+      # surfaces as a confusing mid-build cargo error on every leg at once.
+      - name: Validate targets against Cargo.toml
+        run: |
+          fail=0
+          for f in $(jq -r '.[].feature' packaging/releases.json); do
+            if grep -q "^${f} = " Cargo.toml; then
+              echo "  ok: ${f}"
+            else
+              echo "  ERROR: releases.json wants feature '${f}', not defined in Cargo.toml"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Read deb targets
+        id: read
+        run: |
+          echo "matrix=$(jq -c . packaging/releases.json)" >> "$GITHUB_OUTPUT"
+          echo "Targeting:"; jq -r '.[] | "  \(.codename) (Ubuntu \(.version)) via \(.feature)"' packaging/releases.json
+
+  # One .deb per targeted release, built inside a container of that release.
+  # That is what lets cargo-deb's `$auto` resolve Depends via dpkg-shlibdeps
+  # against the libraries the release actually ships. A single .deb built once
+  # and shipped everywhere would carry the wrong dependency floors — and cannot
+  # work here anyway, because Ubuntu backports unevenly (noble ships WebKitGTK
+  # 2.52 while the newer plucky shipped 2.50).
+  build-deb:
+    needs: targets
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.matrix) }}
     runs-on: ubuntu-latest
     container:
-      image: ubuntu:resolute
-      options: --privileged
+      image: ubuntu:${{ matrix.target.codename }}
     steps:
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
-          apt-get -y update
-          apt-get -y install build-essential curl libssl-dev git \
-            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev libmpv-dev gettext nodejs flatpak-builder
+          apt-get -qq update
+          apt-get -qq install -y --no-install-recommends \
+            build-essential curl ca-certificates git pkg-config libssl-dev \
+            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev libmpv-dev \
+            gettext nodejs
 
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -28,15 +74,108 @@ jobs:
       - name: Rust setup
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: deb-${{ matrix.target.codename }}
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --version 3.7.0 --locked
+
+      # The release is encoded in the Debian revision (1~ubuntu24.04) rather
+      # than appended to the filename: `~` sorts before any plain suffix and
+      # ~ubuntu24.04 sorts before ~ubuntu26.04, so upgrading 24.04 -> 26.04
+      # correctly moves users forward instead of looking like a downgrade. It
+      # also keeps the canonical name_version_arch.deb layout apt expects.
       - name: Build deb package
         run: |
-          cargo install cargo-deb --locked
-          cargo deb
+          cargo deb --deb-revision "1~ubuntu${{ matrix.target.version }}" \
+            -- --no-default-features --features ${{ matrix.target.feature }}
+          ls -la target/debian/
 
-      - name: Upload deb package to release
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.target.codename }}
+          path: target/debian/*.deb
+          if-no-files-found: error
+
+  # Install each .deb into a FRESH container of the release it targets — one
+  # that has never had a -dev package installed. This is the check that catches
+  # a .deb whose Depends name packages that do not exist, which is a failure
+  # this packaging has actually shipped before: dpkg-shlibdeps invents a name
+  # from the SONAME (`libgtk-4` instead of `libgtk-4-1`) when it cannot resolve
+  # one, and the build container never notices.
+  #
+  # Runs packaging/verify-deb.sh — the same script the local harness runs.
+  smoke-test-deb:
+    needs: [targets, build-deb]
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    # Deliberately NOT a `container:` job. The test container must be pristine,
+    # and a container job would need git installed into it before
+    # actions/checkout could run — defeating the point. Driving `docker run`
+    # from the runner keeps the target untouched, and is exactly what
+    # packaging/test-deb.sh does locally, so a failure here reproduces with:
+    #   ./packaging/test-deb.sh <codename>
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download deb artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-${{ matrix.target.codename }}
+          path: dist
+
+      - name: Verify the package installs and runs on a clean system
+        run: |
+          docker run --rm \
+            -v "$PWD/dist:/deb:ro" \
+            -v "$PWD/packaging/verify-deb.sh:/verify-deb.sh:ro" \
+            ubuntu:${{ matrix.target.codename }} \
+            bash /verify-deb.sh /deb
+
+  # Only publish once every target has installed and run somewhere clean.
+  release-deb:
+    needs: smoke-test-deb
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          path: dist
+          merge-multiple: true
+
+      - name: List packages being published
+        run: ls -la dist/
+
+      - name: Upload deb packages to release
         uses: softprops/action-gh-release@v2
         with:
-          files: ./target/debian/*.deb
+          files: ./dist/*.deb
+
+  flatpak:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:resolute
+      options: --privileged
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get -y update
+          apt-get -y install build-essential curl libssl-dev git \
+            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev libmpv-dev \
+            gettext nodejs flatpak-builder
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Python setup
         uses: actions/setup-python@v5
@@ -52,6 +191,9 @@ jobs:
           flatpak install -y org.freedesktop.Platform.codecs-extra//25.08-extra
           flatpak install -y org.freedesktop.Platform.VAAPI.Intel//25.08
           python3 -m pip install toml aiohttp
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build flatpak package
         run: ./flatpak/build.sh
