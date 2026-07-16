@@ -35,3 +35,45 @@ jobs:
 
       - name: Build
         run: cargo build
+
+  # Each packaging target pins the GTK/libadwaita/WebKitGTK API levels of one
+  # Ubuntu release (see packaging/README.md). Type-check every set on every
+  # push: using an API newer than a target ships still compiles here — this
+  # container is resolute — but breaks at runtime on that target. Catching it
+  # at PR time is much cheaper than at release time, when all a maintainer sees
+  # is one leg of the release matrix failing.
+  check-deb-targets:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:resolute
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: |
+          apt-get -y update
+          apt-get -y install build-essential curl libssl-dev jq \
+            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev libmpv-dev gettext nodejs
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: check-deb-targets
+
+      - name: Check every packaging feature set compiles
+        run: |
+          fail=0
+          for f in $(jq -r '.[].feature' packaging/releases.json); do
+            echo "── cargo check --no-default-features --features $f"
+            if cargo check --no-default-features --features "$f"; then
+              echo "   ok: $f"
+            else
+              echo "   FAILED: $f"
+              fail=1
+            fi
+          done
+          exit $fail
