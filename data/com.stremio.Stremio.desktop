@@ -2,7 +2,7 @@
 Name=Stremio
 Comment=Freedom To Stream
 Icon=com.stremio.Stremio
-Categories=Utility;AudioVideo;Video;Player;
+Categories=AudioVideo;Video;Player;
 Keywords=Stremio;Media;Play;
 Type=Application
 Exec=stremio %u
