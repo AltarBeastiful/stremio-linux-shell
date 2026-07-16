@@ -11,7 +11,10 @@ use tokio::runtime::Runtime;
 
 use crate::{
     app::Application,
-    config::{DATA_DIR, GETTEXT_DIR_DEV, GETTEXT_DIR_FLATPAK, GETTEXT_DOMAIN, STARTUP_URL},
+    config::{
+        DATA_DIR, GETTEXT_DIR_DEV, GETTEXT_DIR_FLATPAK, GETTEXT_DIR_SYSTEM, GETTEXT_DOMAIN,
+        STARTUP_URL,
+    },
     server::Server,
 };
 
@@ -33,6 +36,18 @@ struct Args {
 }
 
 fn main() -> ExitCode {
+    // GTK 4.22 defaults to the Vulkan GSK renderer. Compositing our OpenGL video
+    // GLArea through the Vulkan renderer forces an expensive per-frame GL->Vulkan
+    // copy — on an AMD/Mesa laptop that alone was ~50% CPU during playback versus
+    // ~11% with the GL renderer, even with hardware decoding active. Prefer the
+    // GL renderer unless the user overrode it. Must be set before GTK initializes.
+    //
+    // SAFETY: this runs at the very start of main, before any other threads are
+    // spawned, so there is no concurrent access to the environment.
+    if env::var_os("GSK_RENDERER").is_none() {
+        unsafe { env::set_var("GSK_RENDERER", "ngl") };
+    }
+
     tracing_subscriber::fmt::init();
 
     let data_dir = dirs::data_dir()
@@ -41,9 +56,12 @@ fn main() -> ExitCode {
 
     fs::create_dir_all(&data_dir).expect("Failed to create data directory");
 
-    let gettext_dir = match env::var("FLATPAK_ID") {
-        Ok(_) => GETTEXT_DIR_FLATPAK,
-        Err(_) => GETTEXT_DIR_DEV,
+    let gettext_dir = if env::var("FLATPAK_ID").is_ok() {
+        GETTEXT_DIR_FLATPAK
+    } else if fs::exists(GETTEXT_DIR_DEV).unwrap_or(false) {
+        GETTEXT_DIR_DEV
+    } else {
+        GETTEXT_DIR_SYSTEM
     };
 
     gettextrs::bindtextdomain(GETTEXT_DOMAIN, gettext_dir).expect("Failed to bind text domain");
