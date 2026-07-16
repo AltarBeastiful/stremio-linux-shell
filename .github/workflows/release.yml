@@ -30,7 +30,7 @@ jobs:
 
       - name: Build deb package
         run: |
-          cargo install cargo-deb
+          cargo install cargo-deb --locked
           cargo deb
 
       - name: Upload deb package to release
@@ -53,9 +53,6 @@ jobs:
           flatpak install -y org.freedesktop.Platform.VAAPI.Intel//25.08
           python3 -m pip install toml aiohttp
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-  
       - name: Build flatpak package
         run: ./flatpak/build.sh
 
