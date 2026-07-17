@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod gpu;
 mod server;
 mod utils;
 
@@ -36,22 +37,20 @@ struct Args {
 }
 
 fn main() -> ExitCode {
-    // GTK 4.22 defaults to the Vulkan GSK renderer. Compositing our OpenGL video
-    // GLArea through it forces a per-frame GL->Vulkan copy, which dominates
-    // playback CPU even when hardware decoding is active. Prefer the GL renderer,
-    // unless a renderer was already chosen — data/stremio.sh sets `opengl` for
-    // Nvidia, and `opengl` and `gl` are the same renderer here, so the two compose.
-    // Must be set before GTK initializes.
-    //
-    // The name is `gl`: GTK renamed the new GL renderer in 4.18. `ngl` still
-    // resolves to it as a deprecated alias, but warns. Any name GTK does not
-    // recognize falls back to the Vulkan renderer this is meant to avoid, so the
-    // value is worth keeping in step with `GSK_RENDERER=help`.
+    // GTK 4.14+ defaults to the Vulkan GSK renderer, which composites our OpenGL
+    // video GLArea through a per-frame GL->Vulkan bridge that dominates playback
+    // CPU even with hardware decoding. The GL renderer composites it natively, so
+    // prefer it whenever a GPU is present (see gpu.rs), unless a renderer was
+    // already chosen — data/stremio.sh sets `opengl` for Nvidia, and `opengl`
+    // and `gl` are the same renderer, so the two compose. Must be set before GTK
+    // initializes.
     //
     // SAFETY: this runs at the very start of main, before any other threads are
     // spawned, so there is no concurrent access to the environment.
-    if env::var_os("GSK_RENDERER").is_none() {
-        unsafe { env::set_var("GSK_RENDERER", "gl") };
+    if env::var_os("GSK_RENDERER").is_none()
+        && let Some(renderer) = gpu::preferred_gsk_renderer()
+    {
+        unsafe { env::set_var("GSK_RENDERER", renderer) };
     }
 
     tracing_subscriber::fmt::init();
