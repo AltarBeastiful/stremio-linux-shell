@@ -11,6 +11,9 @@ pub struct CachedOverlay {
     /// child actually changes — never per video frame.
     pub(super) cached: RefCell<Option<gdk::Paintable>>,
     pub(super) dirty: Cell<bool>,
+    /// Last size we captured at. A resize or scale change re-lays-out the child
+    /// at a new size; recapture then rather than stretch the old texture.
+    pub(super) last_size: Cell<(i32, i32)>,
 }
 
 #[glib::object_subclass]
@@ -38,6 +41,11 @@ impl WidgetImpl for CachedOverlay {
     }
 
     fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+        // A size change makes the cached texture the wrong size; restale it so
+        // the next snapshot re-captures at the new size instead of scaling.
+        if self.last_size.replace((width, height)) != (width, height) {
+            self.dirty.set(true);
+        }
         if let Some(child) = self.child.borrow().as_ref() {
             child.allocate(width, height, baseline, None);
         }

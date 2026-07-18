@@ -74,4 +74,9 @@ impl CachedOverlay {
     pub(crate) fn is_dirty(&self) -> bool {
         self.imp().dirty.get()
     }
+
+    #[cfg(test)]
+    pub(crate) fn mark_clean(&self) {
+        self.imp().dirty.set(false);
+    }
 }

@@ -143,9 +143,10 @@ Three sub-decisions:
 
 ## ADR-0003 — Decouple the UI overlay's compositing from the video frame clock
 
-**Status:** Proposed. Reworked after the subsurface/offload approach was rejected
-(see below). Direction chosen; exact mechanism to be settled by one experiment on
-hardware (DEVLOG §16). Motivated by DEVLOG §10–§11 and §16.
+**Status:** Proposed, mechanism **(a) validated by measurement** (DEVLOG §17);
+implemented behind `STREMIO_CACHED_OVERLAY` for a final real-playback A/B.
+Reworked after the subsurface/offload approach was rejected (see below).
+Motivated by DEVLOG §10–§11, §16–§17.
 
 ### Context
 
@@ -187,12 +188,14 @@ flowchart TD
   Q -->|"(b) freeze"| H["skip the UI entirely while it is idle/transparent; re-include on UI activity"]
 ```
 
-- **(a) Cache the UI as a texture (preferred).** Snapshot the WebView to a
-  `GdkTexture` (e.g. via `GtkWidgetPaintable` + an explicit texture cache) and
-  composite that cached texture over the video. Refresh it only on the WebView's
-  own invalidation (controls show/hide, seekbar tick — ~1/s), not per video frame.
-  Per-frame cost becomes a **GPU texture blend at any scale**; WebKit's software
-  render happens rarely. Keeps the UI always visible (no UX change).
+- **(a) Cache the UI as a texture (preferred — implemented, measured).**
+  `src/app/cached_overlay/` (`StremioCachedOverlay`) keeps the WebView parented
+  (so it renders and receives input) but draws a cached `GtkWidgetPaintable::current_image()`
+  of it, refreshed only on the child's `invalidate-contents` (and on a size
+  change), never per video frame. Per-frame cost becomes a **GPU texture blend at
+  any scale**; DEVLOG §17 measures it at the no-overlay floor. Behind
+  `STREMIO_CACHED_OVERLAY` pending the real-playback A/B. Keeps the UI always
+  visible (no UX change).
 - **(b) Freeze/skip the idle overlay (lighter).** Set the WebView
   `visible=false` (or otherwise exclude it from the snapshot) while the player UI
   is idle and transparent, and restore it on pointer/key activity. Trivial to
@@ -210,16 +213,32 @@ to roughly the video-composite cost (steady playback re-processes the UI ~1/s, n
 60/s); **Mesa** gets slightly cheaper too (fewer per-frame uploads); **no platform
 regresses** — worst case the UI re-composites as often as today.
 
-### Open question the §16 experiment must answer
+### Open question — now answered by measurement (DEVLOG §17)
 
-Is the per-frame cost the WebView being **re-snapshotted** every frame (WebKit
-repainting, or GTK re-snapshotting it because the sibling GLArea invalidates), or
-GSK **re-uploading an unchanged** cairo node every frame? If the former, caching
-alone won't help — the repaint must be stopped (mechanism (b), or a WebKit fix).
-If the latter, caching (a) is the clean fix. One focused-window profile
-(webkit://gpu with `Policy=Always`; check whether the WebView's
-`invalidate-contents` fires per frame) decides it. The `examples/webkit_gpu.rs`
-probe added this round is the harness for that check.
+Was the per-frame cost the UI being **re-snapshotted** every frame, or GSK
+**re-compositing an unchanged** cairo node every frame? The `overlay_bench`
+micro-benchmark settles it: a static software (`GskCairoNode`) overlay over a
+churning GLArea invalidates its contents **0 times** yet still costs ~90% of a
+core at 1440p. So the waste is **GSK re-processing an unchanging node**, and
+**mechanism (a) — caching the UI as a texture — is the correct fix.** Measured,
+same box, `GSK_RENDERER=gl`:
+
+| size | `cairo` (today) | `cached` (fix) | `texture` (ideal) |
+| ---- | --------------- | -------------- | ----------------- |
+| 1280×720  | 62.6% / 60 fps | 17.5% / 60 fps | 18.6% / 60 fps |
+| 2560×1440 | 94.6% / 21 fps | 19.6% / 60 fps | 20.2% / 60 fps |
+
+`cached ≈ texture ≈ no-overlay`: the `WidgetPaintable::current_image()`
+implementation already composites as a GPU texture node, so no `render_texture`
+rewrite is needed. The win grows with resolution (the user runs 4K/170%).
+
+**Residual check (hardware, low risk):** the benchmark uses a static child, so it
+cannot prove the cache *refreshes* correctly when the real WebView updates
+(seekbar tick, buffering spinner, subtitles). One real-playback A/B
+(`STREMIO_CACHED_OVERLAY=1`) confirms those still update through the cache. A
+`BENCH_CHILD_DIRTY` stress (child repaints every frame) already shows the cache
+does not collapse to the software cost even under continuous invalidation
+(21.9% vs 93.6% at 1440p).
 
 ### Consequences
 
@@ -228,9 +247,10 @@ subsurface approach failed); no dependency on GTK offload or a WebKit-on-Nvidia
 upstream fix; keeps the `gl` default and composes with ADR-0004.
 
 **Negative / risks**
-- (a) is real work: a snapshot/texture-cache layer and correct invalidation
-  (resize, DPI change, animation). (b) is small but has UX edge cases (subtitles,
-  dialogs, buffering spinner drawn by the web UI).
+- (a) is a real snapshot/texture-cache layer with correct invalidation (contents
+  change, resize/DPI — both handled and unit-tested). Residual risk is refresh
+  correctness for web-drawn playback elements (subtitles, spinner), which the
+  hardware A/B confirms.
 - Still leaves WebKit rendering the UI in software on Nvidia — only its *frequency*
   is fixed. Acceptable: the UI changes rarely; the video does not.
 

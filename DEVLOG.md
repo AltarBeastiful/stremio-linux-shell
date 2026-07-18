@@ -525,3 +525,74 @@ fire **every frame** (WebKit/GTK re-snapshotting it) or only on real UI change? 
 every frame, caching won't help and the repaint must be stopped; if only on
 change, the texture-cache is the clean fix. That single answer picks the
 mechanism.
+
+## 17. Measuring the fix: `CachedOverlay` vs a synthetic reproduction
+
+Rather than wait for a hardware playback session to answer §16, I built a
+micro-benchmark that reproduces the *shape* of the bug without WebKit or a video:
+`examples/overlay_bench.rs`. It is a `GtkOverlay` whose underlay is a `GtkGLArea`
+re-rendering every frame (standing in for the video) and whose overlay is a
+software UI. Only the compositor moves, so the CPU delta between modes **is** the
+per-frame overlay-compositing cost. Modes:
+
+- `none` — no overlay (floor: the churning underlay alone)
+- `cairo` — a `GtkDrawingArea`; its snapshot is a `GskCairoNode`, the exact node
+  WebKit produces in software on Nvidia
+- `cached` — that same DrawingArea wrapped in the **real** `CachedOverlay`
+  (included via `#[path]`, so the benchmark exercises production code)
+- `texture` — the same pixels pre-rasterised to a `GdkTexture` (the ideal: a
+  guaranteed GPU blit per frame)
+
+Measured on the Nvidia box (GTX 1060, `GSK_RENDERER=gl`, 8 s per run, self CPU
+from `/proc/self/stat`):
+
+| size | mode | CPU% | fps |
+| ---- | ---- | ---- | --- |
+| 1280×720  | none    | 20.5 | 60 |
+| 1280×720  | cairo   | **62.6** | 60 |
+| 1280×720  | cached  | **17.5** | 60 |
+| 1280×720  | texture | 18.6 | 60 |
+| 2560×1440 | none    | 19.6 | 60 |
+| 2560×1440 | cairo   | **94.6** | **21** |
+| 2560×1440 | cached  | **19.6** | 60 |
+| 2560×1440 | texture | 20.2 | 60 |
+
+Three things fall out:
+
+1. **The root cause is confirmed and it is compositing, not repaint.** With a
+   `child_invals` counter attached (a passive `WidgetPaintable` observer), the
+   `cairo` overlay's contents invalidate **0** times over 8 s yet it still costs
+   ~90% of a core at 1440p. GSK re-processes the *unchanging* software cairo node
+   **every frame**. This is the §16 open question answered: the waste is GSK
+   re-uploading an unchanged node, not the WebView being re-snapshotted — so
+   **caching is the right mechanism.**
+2. **`CachedOverlay` reaches the ideal floor.** `cached ≈ texture ≈ none` at both
+   sizes — the current `WidgetPaintable::current_image()` implementation already
+   composites as a GPU texture node; no `render_texture` rewrite is needed.
+3. **The win grows with resolution.** At 1440p the software path saturates a core
+   *and drops the video to 21 fps* (the user's "framerate is low" + pinned-core
+   symptom); the cache holds a full 60 fps at the no-overlay cost. The user runs
+   4K/170%, where the gap is larger still.
+
+**Worst-case stress.** A `BENCH_CHILD_DIRTY=1` knob makes the overlay child
+`queue_draw()` every frame — the pessimistic model of WebKit repainting
+continuously. Even then `cached` stayed at **21.9% / 60 fps** vs `cairo`'s
+**93.6% / 20 fps** at 1440p. So the fix does not collapse to the software cost
+even if the UI animates. (Caveat: a `queue_draw` on a widget the overlay never
+renders is not identical to WebKit pushing new frames; the real-playback A/B —
+does the seekbar/subtitle/spinner refresh *through* the cache — is still worth
+running, and remains the last hardware check.)
+
+This does not replace the hardware test, but it de-risks it substantially: the
+compositing mechanism, the fix, and its scaling are now measured on real Nvidia
+hardware, and `CachedOverlay` is confirmed optimal for the dominant (idle-UI)
+case. `overlay_bench` stays in the tree as a runnable regression harness.
+
+### Refactor from the measurements
+
+- Added `examples/overlay_bench.rs` (the harness above).
+- `CachedOverlay` now also restales its cache on a **size change**
+  (`size_allocate` tracks the last size), so a resize/DPI change re-captures at
+  the new size instead of stretching a stale texture. Covered by a new unit test
+  (`a_size_change_restales_the_cache`). No perf refactor was warranted — the
+  benchmark shows the compositing path is already at the texture floor.

@@ -67,6 +67,32 @@ fn starts_dirty_so_it_renders_once_and_reinvalidates_on_change() {
 }
 
 #[test]
+fn a_size_change_restales_the_cache() {
+    if !gtk_ready() {
+        return;
+    }
+    let overlay = CachedOverlay::new(&gtk::Label::new(Some("x")));
+    // Give layout a size request so `allocate` has something to work with.
+    let _ = WidgetExt::measure(&overlay, gtk::Orientation::Horizontal, -1);
+    let _ = WidgetExt::measure(&overlay, gtk::Orientation::Vertical, -1);
+
+    overlay.allocate(80, 40, -1, None);
+    overlay.mark_clean();
+
+    // A new size must restale the cache — otherwise we'd stretch the old texture.
+    overlay.allocate(120, 60, -1, None);
+    assert!(overlay.is_dirty(), "a size change restales the cache");
+
+    // Re-allocating the same size must not restale (no needless re-capture).
+    overlay.mark_clean();
+    overlay.allocate(120, 60, -1, None);
+    assert!(
+        !overlay.is_dirty(),
+        "re-allocating the same size leaves the cache valid"
+    );
+}
+
+#[test]
 fn measures_to_the_child() {
     if !gtk_ready() {
         return;
