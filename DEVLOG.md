@@ -472,4 +472,56 @@ Net: one real regression (`hwdec=auto-safe` on Nvidia), one silent improvement
 - **Nvidia artifacts:** a self-inflicted `hwdec` regression; revert/limit
   `auto-safe` on the Nvidia interop.
 - Next hardware session (playback required): confirm `auto-copy` clears the
-  artifacts, and prototype the dmabuf-offload video path from ADR-0003.
+  artifacts, and run the §16 experiment to pick the ADR-0003 mechanism.
+
+---
+
+## 16. Rejecting the subsurface fix, and a better direction
+
+The first cut of [ADR-0003](./ADR.md) proposed putting the video on its own
+Wayland subsurface (`GtkGraphicsOffload` + a dmabuf paintable). That is
+**rejected**: [GTK declines to offload at fractional
+scales](https://blog.gtk.org/2024/04/17/graphics-offload-revisited/), and
+fractional scaling is far too common to ship a fix that silently no-ops for those
+users. Anything subsurface-based is out.
+
+Two findings reframe the fix as scale-independent:
+
+**1. `glarea_probe` isolates the halves.** The probe (GLArea + libmpv, *no
+WebKit*) on the Nvidia box, 4K/10-bit HEVC:
+
+| Probe, no WebKit | CPU |
+| ---------------- | --- |
+| decode (`hwdec=nvdec`) | ~2.2% |
+| `GSK_RENDERER=vulkan` composite (4K) | ~49.5% |
+| `GSK_RENDERER=gl` composite | not measurable unattended (frame clock throttles an unfocused window to ~1 fps) |
+
+So decode is trivially cheap and the *GLArea* path is not the residual pinned
+core — the WebKit overlay is.
+
+**2. `webkit://gpu` names the WebKit cause.** A standalone probe
+(`examples/webkit_gpu.rs`, added this round) loads `webkit://gpu/stdout`:
+
+```
+"Hardware Acceleration Information": { "Policy": "never", ... }
+```
+
+WebKit's hardware-acceleration **policy defaults to `never`** here (`webkit6`
+exposes only `Always`/`Never`), so it does no accelerated compositing — the UI is
+software. Setting `Always` is *necessary* but, in the shell, was **not
+sufficient**: the transparent overlay still snapshotted to `GskCairoNode` during
+playback. So the shell can't simply flip a WebKit switch.
+
+**The reframed fix (ADR-0003 v2):** the waste is re-processing an **unchanging**
+UI at video frame rate. Kill *that*, inside one GSK surface (no subsurface, so
+any scale, any driver): either **cache the UI as a `GdkTexture`** and refresh it
+only when the UI actually changes (per-frame cost → a GPU blend), or **skip the
+idle transparent overlay** entirely until UI activity. Both are scale-independent
+and help every driver.
+
+**The one experiment left for hardware** (`webkit_gpu.rs` is the harness): with a
+*focused* window and `Policy=Always`, does the WebView's `invalidate-contents`
+fire **every frame** (WebKit/GTK re-snapshotting it) or only on real UI change? If
+every frame, caching won't help and the repaint must be stopped; if only on
+change, the texture-cache is the clean fix. That single answer picks the
+mechanism.

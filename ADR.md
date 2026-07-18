@@ -141,107 +141,111 @@ Three sub-decisions:
 
 ---
 
-## ADR-0003 — Decouple video presentation from GSK compositing (dmabuf paintable + graphics offload)
+## ADR-0003 — Decouple the UI overlay's compositing from the video frame clock
 
-**Status:** Proposed. Motivated by the Nvidia investigation in DEVLOG §10–§11;
-not yet prototyped (needs a hardware playback session).
+**Status:** Proposed. Reworked after the subsurface/offload approach was rejected
+(see below). Direction chosen; exact mechanism to be settled by one experiment on
+hardware (DEVLOG §16). Motivated by DEVLOG §10–§11 and §16.
 
 ### Context
 
 ADR-0001 (`gl` renderer) fixes AMD/Mesa but **does not** fix Nvidia: a full CPU
-core stays pinned during playback and the picture shows compositing artifacts.
-Root cause (DEVLOG §11, confirmed with `GDK_DEBUG=offload` + `perf`):
+core stays pinned during playback. Root cause (DEVLOG §11):
 
 - The window is a `GtkOverlay` — video `GtkGLArea` underlay, **transparent**
   WebKitGTK UI overlay on top.
-- On the proprietary Nvidia driver, **WebKitGTK's Skia GPU context does not come
-  up; it falls back to the Skia CPU worker**, so the UI snapshots to a
-  `GskCairoNode` (software surface). Verify on any box with `webkit://gpu`.
-- Because that software surface **overlaps** the video and the video changes every
-  frame, GSK re-uploads (`memmove`) and re-composites (`libnvidia-eglcore`) it on
-  the CPU 60×/s. On Mesa, Skia GPU works → the UI is a texture node → GPU
-  compositing → cheap. That single difference is the whole Nvidia-vs-AMD split.
+- On the proprietary Nvidia driver the UI snapshots to a software `GskCairoNode`.
+  New this round (DEVLOG §16, via `webkit://gpu`): WebKit's
+  **hardware-acceleration `Policy` is `never` by default** in this build
+  (`webkit6` only exposes `Always`/`Never` — no `OnDemand`), so WebKit does no
+  accelerated compositing at all. On Mesa the UI still ends up a GPU texture (the
+  Skia CPU raster is uploaded cheaply); on Nvidia the whole thing stays on the CPU.
+- Because that software surface **overlaps** the video, and the video changes
+  every frame, GSK re-processes the UI on the CPU **60×/s** even though the UI
+  itself is unchanged. That per-frame re-processing of an *unchanging* overlay is
+  the waste — and it is a waste on every driver, just cheap enough to ignore on
+  Mesa.
 
-Two structural facts constrain any shell-side fix:
-
-1. `GtkGraphicsOffload` only offloads a widget whose content is a single **dmabuf
-   texture**. The current `set_overlay` wraps the **WebView** in
-   `GtkGraphicsOffload` — a no-op ("Only textures supported (found
-   GskCairoNode)"). And a `GtkGLArea` renders into a GL FBO
-   (`GskGLTextureNode`), which is *also* not a scanout dmabuf — moving the wrapper
-   onto the GLArea only "lowers" the subsurface, it never truly offloads.
-2. [GTK **declines to offload at fractional scales**](https://blog.gtk.org/2024/04/17/graphics-offload-revisited/).
-   The Nvidia test box runs **170 %**, so offload cannot engage there regardless.
-
-The WebKit software fallback itself is **upstream** and not shell-fixable (no env
-var forces the Skia GPU path up on Nvidia; `WEBKIT_DISABLE_DMABUF_RENDERER=1` only
-makes it more software). Upstream has fixed the *GSK-renderer* half (`638b5af`,
-PR #108, issue #103) but has **not** touched the WebKit recomposite, the
-ineffective offload wrapper, or the fractional-scale interaction.
+**Why the obvious fix is rejected.** Putting the video on its own Wayland
+subsurface (`GtkGraphicsOffload` + a dmabuf `GdkPaintable`) *would* bypass GSK —
+but [GTK declines to offload at fractional
+scales](https://blog.gtk.org/2024/04/17/graphics-offload-revisited/), and
+fractional scaling is common enough that shipping a fix that silently does nothing
+for those users is unacceptable. **Any subsurface/offload-based approach is out.**
 
 ### Decision (proposed)
 
-Stop compositing the video **through** GSK. Present it on its own Wayland
-subsurface so per-frame video updates bypass GSK entirely, and the software UI is
-re-composited only when *it* changes:
+Attack the actual waste — re-compositing an **unchanging** UI at video frame rate
+— within a single GSK surface (no subsurface, so scale-independent and
+all-driver). Two mechanisms are viable; pick per the §16 experiment:
 
 ```mermaid
 flowchart TD
-  A["mpv render API"] -->|"render into a dmabuf-backed texture (EGL/GBM)"| B["GdkDmabufTexture"]
-  B --> C["GdkPaintable → GtkPicture"]
-  C --> D["GtkGraphicsOffload (video underlay)"]
-  D -->|"integer scale, Wayland"| E["compositor subsurface — scans out video directly"]
-  D -->|"fractional scale OR no dmabuf"| F["falls back to in-GSK compositing (status quo)"]
+  V["video GLArea: new frame 60×/s"] --> Q{"does the UI need re-processing?"}
+  Q -->|"today"| N["GSK re-processes the software UI every frame (CPU on Nvidia)"]
+  Q -->|"(a) cache"| C["composite a cached GdkTexture of the UI (GPU blend); refresh only when the UI actually changes"]
+  Q -->|"(b) freeze"| H["skip the UI entirely while it is idle/transparent; re-include on UI activity"]
 ```
 
-Concretely:
-
-1. **Rework `src/app/video/imp.rs` from `GtkGLArea` + FBO to a `GtkPicture` fed by
-   a dmabuf `GdkPaintable`.** mpv renders into a dmabuf-backed texture (EGL image
-   over a GBM buffer, or mpv's dmabuf output), handed to GTK as a
-   `GdkDmabufTexture`. This is the "future work" ADR-0001 parked.
-2. **Move `GtkGraphicsOffload` off the WebView and onto the video** (the WebView
-   can never offload; the dmabuf video can).
-3. Keep the `gl` GSK default (ADR-0001) for the non-offloaded / fractional-scale
-   path — it is still the cheapest fallback.
+- **(a) Cache the UI as a texture (preferred).** Snapshot the WebView to a
+  `GdkTexture` (e.g. via `GtkWidgetPaintable` + an explicit texture cache) and
+  composite that cached texture over the video. Refresh it only on the WebView's
+  own invalidation (controls show/hide, seekbar tick — ~1/s), not per video frame.
+  Per-frame cost becomes a **GPU texture blend at any scale**; WebKit's software
+  render happens rarely. Keeps the UI always visible (no UX change).
+- **(b) Freeze/skip the idle overlay (lighter).** Set the WebView
+  `visible=false` (or otherwise exclude it from the snapshot) while the player UI
+  is idle and transparent, and restore it on pointer/key activity. Trivial to
+  implement; risk is any web-drawn content that must stay visible during playback
+  (needs the §16 subtitle check).
+- **Complement, both cases:** set
+  `settings.set_hardware_acceleration_policy(Always)` (default is `Never`). It is
+  necessary (not sufficient) and reduces the software-render cost on the
+  UI-change path for everyone.
 
 ### Per-platform outcome
 
-| Platform | Scale | Result |
-| -------- | ----- | ------ |
-| AMD / Intel / nouveau (Mesa) | any | Already OK via `gl`; offload is a bonus at integer scale (video off the GPU-composite path entirely). |
-| **Nvidia (proprietary)** | **integer (100/200 %)** | **Fixed** — video scanned out by the compositor; the software UI is re-composited only on change, not per frame. |
-| **Nvidia (proprietary)** | **fractional (e.g. 170 %)** | **Not fixed by the shell** — offload declines, video stays in GSK, WebKit software recomposite remains. Bottlenecked upstream (WebKit Skia-GPU-on-Nvidia). Mitigation: document `webkit://gpu`, recommend an integer scale, and track upstream. |
+Scale-independent by construction. Expected: **Nvidia** drops from ~1 pinned core
+to roughly the video-composite cost (steady playback re-processes the UI ~1/s, not
+60/s); **Mesa** gets slightly cheaper too (fewer per-frame uploads); **no platform
+regresses** — worst case the UI re-composites as often as today.
 
-So this is "a fix for all platforms **where offload can engage**", plus an honest
-upstream dependency for fractional-scale Nvidia. It never regresses a platform:
-when offload can't engage it falls back to today's behaviour.
+### Open question the §16 experiment must answer
+
+Is the per-frame cost the WebView being **re-snapshotted** every frame (WebKit
+repainting, or GTK re-snapshotting it because the sibling GLArea invalidates), or
+GSK **re-uploading an unchanged** cairo node every frame? If the former, caching
+alone won't help — the repaint must be stopped (mechanism (b), or a WebKit fix).
+If the latter, caching (a) is the clean fix. One focused-window profile
+(webkit://gpu with `Policy=Always`; check whether the WebView's
+`invalidate-contents` fires per frame) decides it. The `examples/webkit_gpu.rs`
+probe added this round is the harness for that check.
 
 ### Consequences
 
-**Positive** — removes the per-frame GSK recomposite on the whole offload-eligible
-matrix (biggest win on Nvidia); the fix is driver-agnostic; composes with the `gl`
-default and with ADR-0004.
+**Positive** — works at every scale and on every driver (the constraint the
+subsurface approach failed); no dependency on GTK offload or a WebKit-on-Nvidia
+upstream fix; keeps the `gl` default and composes with ADR-0004.
 
 **Negative / risks**
-- Real rework of the video widget and the mpv render integration (dmabuf/EGL
-  import, buffer lifetime, resize). The GLArea path is simpler.
-- Zero-copy dmabuf presentation interacts with the hwdec interop — must land with
-  ADR-0004, not independently.
-- Fractional-scale Nvidia is left on the upstream WebKit dependency; needs to be
-  documented so it is not mistaken for an unfixed shell bug.
-- Subsurface z-order / transparency edge cases under the overlay to validate.
+- (a) is real work: a snapshot/texture-cache layer and correct invalidation
+  (resize, DPI change, animation). (b) is small but has UX edge cases (subtitles,
+  dialogs, buffering spinner drawn by the web UI).
+- Still leaves WebKit rendering the UI in software on Nvidia — only its *frequency*
+  is fixed. Acceptable: the UI changes rarely; the video does not.
 
-### Alternatives considered
+### Alternatives considered (rejected)
 
-- **Keep `GtkGLArea`, just move the offload wrapper onto it.** Tried — "lowers" but
-  never offloads (no dmabuf); CPU unchanged. Rejected.
-- **Make WebKit render on GPU on Nvidia** (`hardware-acceleration-policy=Always`,
-  disable sandbox/dmabuf renderer). All tried, all left the UI a `GskCairoNode`.
-  It's an upstream WebKit limitation, not a shell setting. Rejected as a shell fix;
-  pursue as an upstream track instead.
-- **Force an integer scale for the app.** User-hostile and doesn't generalise.
-- **`GSK_RENDERER=cairo`.** Makes *everything* software — worse.
+- **`GtkGraphicsOffload` / dmabuf video subsurface.** The clean bypass, but GTK
+  declines it at fractional scale → breaks a large share of users. **Rejected**
+  (this is the reversal from the first draft of this ADR).
+- **`hardware-acceleration-policy=Always` alone.** Necessary but insufficient on
+  Nvidia — the transparent overlay still snapshots to `GskCairoNode` in testing.
+  Kept only as a complement above.
+- **Force an integer scale / `GSK_RENDERER=cairo`.** User-hostile / makes
+  everything software. Rejected.
+- **Wait for upstream WebKit Skia-GPU-on-Nvidia.** Out of the shell's hands and
+  no ETA; track it, but do not depend on it for the fix.
 
 ---
 
