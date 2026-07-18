@@ -1,3 +1,4 @@
+mod cached_overlay;
 mod config;
 mod dialogs;
 mod imp;

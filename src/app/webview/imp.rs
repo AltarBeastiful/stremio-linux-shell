@@ -35,6 +35,15 @@ impl ObjectImpl for WebView {
             settings.set_enable_media_capabilities(false);
             settings.set_enable_media_stream(false);
             settings.set_enable_webaudio(false);
+
+            // WebKit's hardware-acceleration policy defaults to `Never` here
+            // (webkit6 exposes only Always/Never), i.e. no accelerated
+            // compositing — the UI renders in software. Force `Always` so WebKit
+            // uses the GPU where it can. Necessary but not sufficient on Nvidia
+            // (the transparent overlay still snapshots to a GskCairoNode), which
+            // is why the per-frame recomposite is also addressed by CachedOverlay
+            // (ADR-0003).
+            settings.set_hardware_acceleration_policy(webkit::HardwareAccelerationPolicy::Always);
         }
 
         let gesture = GestureClick::new();

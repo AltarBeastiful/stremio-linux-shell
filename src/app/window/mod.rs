@@ -7,7 +7,7 @@ use gtk::{
     prelude::{GtkWindowExt, WidgetExt},
 };
 
-use crate::app::Application;
+use crate::app::{Application, cached_overlay::CachedOverlay};
 
 glib::wrapper! {
     pub struct Window(ObjectSubclass<imp::Window>)
@@ -31,7 +31,16 @@ impl Window {
     pub fn set_overlay(&self, widget: &impl IsA<Widget>) {
         let window = self.imp();
 
-        window.overlay.add_overlay(&graphics_offload(widget));
+        // ADR-0003: compositing the (software-on-Nvidia) WebKit UI over the video
+        // every frame pins a CPU core. `CachedOverlay` composites a cached texture
+        // of the UI instead, refreshed only when the UI changes — a GPU blend per
+        // frame at any scale, on any driver. Behind an env toggle for now so it
+        // can be A/B'd against the `GtkGraphicsOffload` path on hardware.
+        if std::env::var_os("STREMIO_CACHED_OVERLAY").is_some() {
+            window.overlay.add_overlay(&CachedOverlay::new(widget));
+        } else {
+            window.overlay.add_overlay(&graphics_offload(widget));
+        }
     }
 
     pub fn set_fullscreen(&self, fullscreen: bool) {
