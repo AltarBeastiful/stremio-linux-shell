@@ -21,6 +21,26 @@ use crate::spawn_local;
 /// GLib main loop still sleeps between ticks so idle CPU stays negligible.
 const EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
+/// The default `hwdec` mode. Zero-copy `auto-safe` keeps decoded frames on the
+/// GPU; it is verified on the VAAPI/Mesa interop but produces playback artifacts
+/// on Nvidia's nvdec interop (ADR-0004), so the proprietary Nvidia driver gets
+/// the safe copy-back `auto-copy` until its zero-copy path is validated.
+pub(super) fn preferred_hwdec() -> &'static str {
+    if zero_copy_hwdec_safe() {
+        "auto-safe"
+    } else {
+        "auto-copy"
+    }
+}
+
+/// Whether the zero-copy hwdec interop is one we've verified. Currently false on
+/// the proprietary Nvidia driver (`/dev/nvidia0`), where zero-copy nvdec
+/// artifacts; everything else (VAAPI on Mesa) is the measured, safe path. Reused
+/// by the web-UI `hwdec` remap in `mod.rs` so both entry points agree.
+pub(super) fn zero_copy_hwdec_safe() -> bool {
+    !std::path::Path::new("/dev/nvidia0").exists()
+}
+
 fn get_proc_address(_context: &GLContext, name: &str) -> *mut c_void {
     epoxy::get_proc_addr(name) as _
 }
@@ -44,13 +64,17 @@ impl Default for Video {
             init.set_property("vo", "libmpv")?;
             init.set_property("video-timing-offset", "0")?;
             init.set_property("video-sync", "audio")?;
-            // Enable zero-copy hardware decoding by default. mpv otherwise
-            // defaults to software decoding, and the web UI only ever asks for
-            // the copy-back path (`hwdec=auto-copy`, remapped in mod.rs). Our GL
-            // render context is created with the Wayland display, so mpv can use
-            // the EGL/dmabuf interop (VAAPI on Mesa) and keep frames on the GPU.
-            // `auto-safe` falls back to software when no safe interop exists.
-            init.set_property("hwdec", "auto-safe")?;
+            // Enable hardware decoding by default; mpv otherwise decodes on the
+            // CPU, and the web UI only ever asks for it at runtime (too late to
+            // bring up the interop cleanly). Prefer the zero-copy interop
+            // (`auto-safe`) where it is verified — on VAAPI/Mesa our render
+            // context (created with the Wayland display) keeps frames on the GPU
+            // via the EGL/dmabuf interop. On the proprietary Nvidia driver that
+            // zero-copy nvdec interop is unverified and produces playback
+            // artifacts (ADR-0004), so fall back to the safe copy-back path
+            // there. Either way mpv falls back to software when no hwdec is
+            // available, so playback can never break.
+            init.set_property("hwdec", preferred_hwdec())?;
             init.set_property("terminal", "yes")?;
             init.set_property("msg-level", msg_level)?;
             Ok(())

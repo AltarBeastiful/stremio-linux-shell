@@ -128,7 +128,14 @@ impl Video {
                     // to `auto-safe`, which uses such an interop when a known-good
                     // one is available and otherwise falls back to software
                     // decoding, so playback can never break.
-                    let value = if name == "hwdec" && value == "auto-copy" {
+                    //
+                    // Only where the zero-copy interop is verified though: on the
+                    // proprietary Nvidia driver it artifacts (ADR-0004), so leave
+                    // the web UI's `auto-copy` in place there.
+                    let value = if name == "hwdec"
+                        && value == "auto-copy"
+                        && imp::zero_copy_hwdec_safe()
+                    {
                         "auto-safe"
                     } else {
                         value
