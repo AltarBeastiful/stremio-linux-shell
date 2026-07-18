@@ -141,6 +141,160 @@ Three sub-decisions:
 
 ---
 
+## ADR-0003 — Decouple video presentation from GSK compositing (dmabuf paintable + graphics offload)
+
+**Status:** Proposed. Motivated by the Nvidia investigation in DEVLOG §10–§11;
+not yet prototyped (needs a hardware playback session).
+
+### Context
+
+ADR-0001 (`gl` renderer) fixes AMD/Mesa but **does not** fix Nvidia: a full CPU
+core stays pinned during playback and the picture shows compositing artifacts.
+Root cause (DEVLOG §11, confirmed with `GDK_DEBUG=offload` + `perf`):
+
+- The window is a `GtkOverlay` — video `GtkGLArea` underlay, **transparent**
+  WebKitGTK UI overlay on top.
+- On the proprietary Nvidia driver, **WebKitGTK's Skia GPU context does not come
+  up; it falls back to the Skia CPU worker**, so the UI snapshots to a
+  `GskCairoNode` (software surface). Verify on any box with `webkit://gpu`.
+- Because that software surface **overlaps** the video and the video changes every
+  frame, GSK re-uploads (`memmove`) and re-composites (`libnvidia-eglcore`) it on
+  the CPU 60×/s. On Mesa, Skia GPU works → the UI is a texture node → GPU
+  compositing → cheap. That single difference is the whole Nvidia-vs-AMD split.
+
+Two structural facts constrain any shell-side fix:
+
+1. `GtkGraphicsOffload` only offloads a widget whose content is a single **dmabuf
+   texture**. The current `set_overlay` wraps the **WebView** in
+   `GtkGraphicsOffload` — a no-op ("Only textures supported (found
+   GskCairoNode)"). And a `GtkGLArea` renders into a GL FBO
+   (`GskGLTextureNode`), which is *also* not a scanout dmabuf — moving the wrapper
+   onto the GLArea only "lowers" the subsurface, it never truly offloads.
+2. [GTK **declines to offload at fractional scales**](https://blog.gtk.org/2024/04/17/graphics-offload-revisited/).
+   The Nvidia test box runs **170 %**, so offload cannot engage there regardless.
+
+The WebKit software fallback itself is **upstream** and not shell-fixable (no env
+var forces the Skia GPU path up on Nvidia; `WEBKIT_DISABLE_DMABUF_RENDERER=1` only
+makes it more software). Upstream has fixed the *GSK-renderer* half (`638b5af`,
+PR #108, issue #103) but has **not** touched the WebKit recomposite, the
+ineffective offload wrapper, or the fractional-scale interaction.
+
+### Decision (proposed)
+
+Stop compositing the video **through** GSK. Present it on its own Wayland
+subsurface so per-frame video updates bypass GSK entirely, and the software UI is
+re-composited only when *it* changes:
+
+```mermaid
+flowchart TD
+  A["mpv render API"] -->|"render into a dmabuf-backed texture (EGL/GBM)"| B["GdkDmabufTexture"]
+  B --> C["GdkPaintable → GtkPicture"]
+  C --> D["GtkGraphicsOffload (video underlay)"]
+  D -->|"integer scale, Wayland"| E["compositor subsurface — scans out video directly"]
+  D -->|"fractional scale OR no dmabuf"| F["falls back to in-GSK compositing (status quo)"]
+```
+
+Concretely:
+
+1. **Rework `src/app/video/imp.rs` from `GtkGLArea` + FBO to a `GtkPicture` fed by
+   a dmabuf `GdkPaintable`.** mpv renders into a dmabuf-backed texture (EGL image
+   over a GBM buffer, or mpv's dmabuf output), handed to GTK as a
+   `GdkDmabufTexture`. This is the "future work" ADR-0001 parked.
+2. **Move `GtkGraphicsOffload` off the WebView and onto the video** (the WebView
+   can never offload; the dmabuf video can).
+3. Keep the `gl` GSK default (ADR-0001) for the non-offloaded / fractional-scale
+   path — it is still the cheapest fallback.
+
+### Per-platform outcome
+
+| Platform | Scale | Result |
+| -------- | ----- | ------ |
+| AMD / Intel / nouveau (Mesa) | any | Already OK via `gl`; offload is a bonus at integer scale (video off the GPU-composite path entirely). |
+| **Nvidia (proprietary)** | **integer (100/200 %)** | **Fixed** — video scanned out by the compositor; the software UI is re-composited only on change, not per frame. |
+| **Nvidia (proprietary)** | **fractional (e.g. 170 %)** | **Not fixed by the shell** — offload declines, video stays in GSK, WebKit software recomposite remains. Bottlenecked upstream (WebKit Skia-GPU-on-Nvidia). Mitigation: document `webkit://gpu`, recommend an integer scale, and track upstream. |
+
+So this is "a fix for all platforms **where offload can engage**", plus an honest
+upstream dependency for fractional-scale Nvidia. It never regresses a platform:
+when offload can't engage it falls back to today's behaviour.
+
+### Consequences
+
+**Positive** — removes the per-frame GSK recomposite on the whole offload-eligible
+matrix (biggest win on Nvidia); the fix is driver-agnostic; composes with the `gl`
+default and with ADR-0004.
+
+**Negative / risks**
+- Real rework of the video widget and the mpv render integration (dmabuf/EGL
+  import, buffer lifetime, resize). The GLArea path is simpler.
+- Zero-copy dmabuf presentation interacts with the hwdec interop — must land with
+  ADR-0004, not independently.
+- Fractional-scale Nvidia is left on the upstream WebKit dependency; needs to be
+  documented so it is not mistaken for an unfixed shell bug.
+- Subsurface z-order / transparency edge cases under the overlay to validate.
+
+### Alternatives considered
+
+- **Keep `GtkGLArea`, just move the offload wrapper onto it.** Tried — "lowers" but
+  never offloads (no dmabuf); CPU unchanged. Rejected.
+- **Make WebKit render on GPU on Nvidia** (`hardware-acceleration-policy=Always`,
+  disable sandbox/dmabuf renderer). All tried, all left the UI a `GskCairoNode`.
+  It's an upstream WebKit limitation, not a shell setting. Rejected as a shell fix;
+  pursue as an upstream track instead.
+- **Force an integer scale for the app.** User-hostile and doesn't generalise.
+- **`GSK_RENDERER=cairo`.** Makes *everything* software — worse.
+
+---
+
+## ADR-0004 — Scope zero-copy `hwdec` to interops we've verified
+
+**Status:** Proposed. Motivated by DEVLOG §12; needs a playback session to confirm.
+
+### Context
+
+`a7597b7` sets `hwdec=auto-safe` at init and `c1123bc` remaps the web UI's
+`hwdec=auto-copy` request to `auto-safe` (`video/mod.rs:131`). `auto-safe` is the
+**zero-copy** GPU interop; `auto-copy` copies frames back through system memory.
+
+That change was **verified on VAAPI/Mesa only** ("Using EGL dmabuf interop via
+`GL_OES_EGL_image` … Initialized VAAPI"). On the Nvidia box the deb (which forces
+`auto-safe`) shows **playback artifacts**; the upstream stable Flatpak — which
+sets no `hwdec`, so the web UI's `auto-copy` stands — does **not**, on the same
+GTK/mpv versions. So forcing zero-copy on Nvidia's nvdec/CUDA-GL interop is a
+**regression**. It is not local to this branch: the same commits ride in upstream
+**PR #108**, so merging that PR as-is ships the artifacts to the official Flatpak.
+
+### Decision (proposed)
+
+Do **not** force the zero-copy interop where it is unverified. Prefer the web UI's
+`auto-copy` unless the shell has reason to believe zero-copy is sound:
+
+- Apply the `auto-copy → auto-safe` remap (and the init default) **only for the
+  VAAPI/Mesa interop** (the one measured), leaving the proprietary Nvidia path on
+  the copy-back `auto-copy` the web UI already asks for; **or**
+- gate zero-copy on a successful interop probe at render-context creation.
+
+The exact predicate is an implementation detail; the decision is that
+`auto-safe`'s scope must match what we've validated, per platform.
+
+### Consequences
+
+- **Positive:** clears the Nvidia artifacts; keeps the measured AMD/Intel zero-copy
+  win (that is what `a7597b7`/#107 were about); makes the default honest about
+  where it's been proven.
+- **Negative:** copy-back on Nvidia costs some CPU vs a (currently broken) zero-copy
+  path — an acceptable trade until the Nvidia interop is verified. A per-interop
+  predicate is slightly more code than a blanket default.
+- **Validation gate:** confirm on the Nvidia box that `auto-copy` clears the
+  artifacts before flipping the default (or before PR #108 merges).
+
+### Alternatives considered
+
+- **Keep the blanket `auto-safe`.** Ships known artifacts to Nvidia users. Rejected.
+- **Drop hwdec defaults entirely (upstream `main` behaviour).** Loses the verified
+  AMD/Intel zero-copy win and reintroduces #107's software-decode cost. Rejected.
+
+---
+
 ## Related decisions recorded elsewhere
 
 These were decided during the same work but live in their natural homes:
