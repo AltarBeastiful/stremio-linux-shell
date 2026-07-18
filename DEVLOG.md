@@ -303,6 +303,23 @@ while the GPU idles.
 > `timeout`/`spawn_local` loops, the menu sits at ~1–3% CPU. The pegged core only
 > appears once the player view (the `GtkGLArea`) is realised **and** playing.
 
+The `glarea_probe` (PR #108's benchmark: `GtkGLArea` + libmpv render, **no
+WebKit**) run on the Nvidia box with a 4K/10-bit HEVC clip isolates the two
+halves of the cost:
+
+| Probe (no WebKit), 4K HEVC, Nvidia | CPU | fps |
+| ---------------------------------- | --- | --- |
+| decode only (`hwdec=nvdec`)         | ~2.2% | — |
+| `GSK_RENDERER=vulkan` compositing   | **~49.5%** | 30 |
+| `GSK_RENDERER=gl` compositing       | not measurable unattended (frame clock throttles an unfocused window to ~1 fps) | 1 |
+
+Two takeaways: **decode is trivially cheap** (nvdec, ~2%), and **the Vulkan GSK
+renderer alone costs ~50% at 4K on Nvidia** even without WebKit — so the `gl`
+default matters for the video path on Nvidia too, not just AMD (DEVLOG §1). The
+`gl` figure needs a focused window (a hardware session) to measure; the probe
+also confirms the *residual* pinned core in the full app (§11) is **not** in this
+GLArea path — it is the WebKit overlay recomposite.
+
 ## 11. Root cause on Nvidia: WebKit renders the UI in software
 
 `perf` (DWARF) on the pinned main thread — self cost, not children:
