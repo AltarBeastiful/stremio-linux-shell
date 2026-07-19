@@ -42,7 +42,9 @@ jobs:
       # exit-code contract so a refactor cannot silently break the regression
       # guard that keeps NVIDIA copy-back from shipping.
       - name: Packaging shell tests
-        run: bash packaging/check-nvdec.test.sh
+        run: |
+          bash packaging/check-nvdec.test.sh
+          bash packaging/stremio-launcher.test.sh
 
   # Each packaging target pins the GTK/libadwaita/WebKitGTK API levels of one
   # Ubuntu release (see packaging/README.md). Type-check every set on every
