@@ -26,12 +26,20 @@ compiles). So the deb is *buildable* but **not yet validated at runtime on NVIDI
 `nvdec` zero-copy silently falls back to copy-back (~100% CPU again) unless libmpv
 is built `--enable-cuda-hwaccel --enable-cuda-interop` with ffmpeg
 `--enable-ffnvcodec`.
-- **Ubuntu 26.04** system `libmpv2` **0.41.0-2ubuntu4 HAS it** — verified
-  (`strings libmpv.so` shows `CUDA hwdec`, `bwdif_cuda`; libavcodec has
-  `av1_nvdec`/`cuvid`). ✅ deb on 26.04 should get the NVIDIA win.
-- **Ubuntu 24.04** — **NOT verified from this machine.** Must confirm its libmpv
-  ships the CUDA interop; if not, NVIDIA users on 24.04 get copy-back (no win).
-- Any future target release needs the same audit.
+**Audited 2026-07-19** in fresh `ubuntu:<codename>` containers (both halves —
+libmpv `CUDA hwdec` string AND libavcodec `nvdec`/`cuvid`). **All three targets
+pass both halves**, so every target is flagged `"expect_nvdec": true` in
+`releases.json`:
+
+| release | libmpv2 | CUDA interop | ffnvcodec (libavcodec) |
+| --- | --- | --- | --- |
+| noble 24.04 | 0.37.0-1ubuntu4 | ✅ | ✅ (av1/h264/hevc `_nvdec` + `_cuvid`) |
+| resolute 26.04 | 0.41.0-2ubuntu4 | ✅ | ✅ (av1/h264/hevc `_nvdec` + `_cuvid`) |
+| stonking 26.10 | 0.41.0-2ubuntu4 | ✅ | ✅ (av1/h264/hevc `_nvdec` + `_cuvid`) |
+
+So **NVIDIA users get the zero-copy win on every current target** (24.04 was the
+open question — now confirmed). Any future target release needs the same audit
+before it is flagged `expect_nvdec: true`.
 
 ### B2 — the deb runs against SYSTEM WebKitGTK = laggy on NVIDIA (ROOT CAUSE FOUND — fixed by a WebKit update)
 The deb links **system** GTK/WebKit; the flatpak bundles the GNOME 50 runtime.
@@ -112,8 +120,11 @@ no GPU), `[NVIDIA box]`, `[wait: SRU]` (calendar, no hardware).
      `grep -a 'CUDA hwdec' $(dpkg -L libmpv2 | grep 'libmpv\.so\.2\.[0-9]')`
    - ffmpeg ffnvcodec:
      `grep -a -m1 -E 'nvdec|cuvid' /usr/lib/*/libavcodec.so.*`
-   Both must hit. 26.04 ✅ (both verified). Do 24.04. Record results here and add an
-   `"expect_nvdec"` flag per release in `releases.json`.
+   Both must hit. **DONE (2026-07-19):** all three targets — noble 24.04, resolute
+   26.04, stonking 26.10 — pass both halves (see B1 table). Each is flagged
+   `"expect_nvdec": true` in `releases.json`. 26.10 (stonking, beta) was added this
+   session at the user's request; it reuses `api-4_22` and already ships
+   WebKitGTK 2.52.4.
 2. **Add a build-time smoke check (B1/B3).** `[any machine]`
    Extend `packaging/verify-deb.sh` with the two `grep -a` checks from step 1
    against the installed libs. **FAIL only when `releases.json` says
@@ -141,7 +152,10 @@ no GPU), `[NVIDIA box]`, `[wait: SRU]` (calendar, no hardware).
      AV1 falls back to software decode (heavy at 4K) regardless of `nvdec`/deb/flatpak
      — a GPU limit, not a bug. `nvdec` zero-copy still applies to H.264/HEVC.
 4. **Per-distro NVIDIA runtime validation (B1/B2/B3).** `[NVIDIA box]`
-   Install each release's deb on NVIDIA, play a 4K HDR title fullscreen:
+   **Runbook: `packaging/nvidia-runtime-check.sh <deb>`** automates install +
+   the system nvdec-capability check + the WebKit-version caveat, then prints the
+   manual playback checklist below. Install each release's deb on NVIDIA, play a
+   4K HDR title fullscreen:
    - (a) mpv logs `Using hardware decoding (nvdec)` (not `*-copy`); (b) `stremio`
      process CPU ~20–25%, A/B vs `STREMIO_HWDEC=auto-copy`. **(a)+(b) must pass now**
      — they are independent of WebKit.
@@ -153,8 +167,13 @@ no GPU), `[NVIDIA box]`, `[wait: SRU]` (calendar, no hardware).
      so this empirical A/B is the decider. Remove the PPA after.
 5. **Hard WebKit floor (B2).** `[wait: SRU — no hardware]`
    Trigger: `rmadison libwebkitgtk-6.0-4` (or launchpad.net/ubuntu/+source/webkitgtk)
-   shows ≥ 2.52.4 in **both** `noble-updates` and `resolute-updates`. Then, in one
-   commit:
+   shows ≥ 2.52.4 in **both** `noble-updates` and `resolute-updates`.
+   **Checked 2026-07-19 (still BLOCKED):** noble-updates has `2.52.3-0ubuntu0.24.04.1`,
+   resolute-updates has `2.52.3-0ubuntu0.26.04.2` — both 2.52.3, below the floor.
+   (The SRU pathway is active: 2.52.3 is already in -updates over the base pockets'
+   2.44.0/2.52.0. stonking 26.10 already ships 2.52.4, so once noble/resolute catch
+   up all three targets satisfy the floor.) Do **not** flip the floor until then.
+   When the trigger fires, in one commit:
    - `depends = "$auto, nodejs, libwebkitgtk-6.0-4 (>= 2.52.4)"`. This **duplicates**
      the `$auto` entry (once with $auto's low floor, once explicit); dpkg/apt apply
      both constraints — that's fine, do **not** "deduplicate" the explicit floor.
@@ -166,7 +185,25 @@ no GPU), `[NVIDIA box]`, `[wait: SRU]` (calendar, no hardware).
      disabled can't install.
 6. **(Optional) extend CI.** A NVIDIA-tagged self-hosted runner (or a manual
    `workflow_dispatch` job) that runs step 4's checks, so runtime regressions are
-   caught, not just compile errors.
+   caught, not just compile errors. The automatable half is ready to wrap
+   (`packaging/nvidia-runtime-check.sh`); the playback A/B (CPU + decode log)
+   still needs a human at a display, so full automation is limited to the
+   install + `check-nvdec.sh` + WebKit-version report. Deferred until a
+   `[self-hosted, nvidia]` runner exists — the GH-hosted pool has no NVIDIA GPU.
+
+## Implementation progress
+
+Session 2026-07-19/20 (this branch, `develop`):
+- **Step 1 DONE** — audited all three targets (noble/resolute/stonking); each
+  `expect_nvdec: true` in `releases.json`. 26.10 (stonking) added at user request.
+- **Step 2 DONE** — `packaging/check-nvdec.sh` (+ unit test) and `verify-deb.sh`
+  TEST 8, wired through `test-deb.sh` and `release.yml` via `EXPECT_NVDEC`.
+  Validated locally: noble + resolute + stonking build, install, and pass TEST 8.
+- **Step 3 DONE** — launcher WebKit warning (`data/stremio.sh`, + unit test) and
+  the NVIDIA/decode section in `packaging/README.md`.
+- **Step 4 PENDING** — needs the NVIDIA box; runbook ready (see above).
+- **Step 5 BLOCKED** — SRU not landed (checked 2026-07-19, see above).
+- **Step 6 DEFERRED** — see above.
 
 ## Quick reference
 - Force a decode mode (support/debug): `STREMIO_HWDEC=nvdec|auto-safe|auto-copy|no`.
