@@ -103,6 +103,25 @@ impl WebView {
         }
     }
 
+    /// Player-chrome visibility from the injected `shell_ui` observer
+    /// (`ipc/preload.js`). `true` = some UI is visible (or unknown — fail-visible),
+    /// `false` = the player chrome is fully hidden and the overlay may be frozen.
+    pub fn connect_ui_visibility<T: Fn(bool) + 'static>(&self, callback: T) {
+        let widget = self.imp();
+
+        if let Some(user_content_manager) = widget.webview.user_content_manager() {
+            user_content_manager.register_script_message_handler("shell_ui", None);
+            user_content_manager.connect_script_message_received(
+                Some("shell_ui"),
+                move |_, value| {
+                    // Fail-visible: anything that isn't exactly "hidden" is visible.
+                    let visible = value.to_string() != "hidden";
+                    callback(visible);
+                },
+            );
+        }
+    }
+
     pub fn connect_fullscreen<T: Fn(bool) + 'static>(&self, callback: T) {
         let widget = self.imp();
 

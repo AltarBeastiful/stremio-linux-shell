@@ -1,4 +1,9 @@
-use std::{cell::Cell, fs::File, os::fd::AsFd, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    fs::File,
+    os::fd::AsFd,
+    sync::Arc,
+};
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
@@ -32,6 +37,10 @@ pub struct Window {
     header: TemplateChild<adw::HeaderBar>,
     #[template_child]
     pub overlay: TemplateChild<gtk::Overlay>,
+    /// The UI overlay wrapper, kept so the freeze controller can exclude the
+    /// WebKit UI from the render scene while the player chrome is hidden
+    /// (IMPLEMENTATION_PLAN.md). Set in `Window::set_overlay`.
+    pub ui_overlay: RefCell<Option<crate::app::freeze_overlay::FreezeOverlay>>,
     pub inhibit_request: Arc<Mutex<Option<Request<()>>>>,
 }
 

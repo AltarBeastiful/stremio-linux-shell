@@ -1,4 +1,9 @@
+// `cached_overlay` was falsified on hardware (renders black on the real WebView,
+// DEVLOG §18) and is no longer part of the shell. Its source is retained only as
+// the historical comparison arm in `examples/overlay_bench.rs` (included there by
+// `#[path]`), not compiled into the app.
 mod config;
+mod freeze_overlay;
 mod dialogs;
 mod imp;
 mod ipc;

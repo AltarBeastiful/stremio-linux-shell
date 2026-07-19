@@ -1,4 +1,8 @@
-use std::cell::{Cell, RefCell};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use adw::{prelude::*, subclass::prelude::*};
 use gtk::glib::{self, Properties, clone};
@@ -21,6 +25,40 @@ use crate::{
 };
 
 const PRELOAD_SCRIPT: &str = include_str!("ipc/preload.js");
+
+/// Debounce so a stale "hidden" report arriving just after local input can't
+/// re-freeze the overlay the user is actively driving.
+const FREEZE_INPUT_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// State for the freeze controller (IMPLEMENTATION_PLAN.md): the overlay is
+/// frozen only while playback is active AND the player chrome is hidden AND the
+/// user hasn't just interacted. Any local input restores it eagerly.
+struct FreezeState {
+    playing: Cell<bool>,
+    ui_visible: Cell<bool>,
+    last_input: Cell<Instant>,
+}
+
+impl FreezeState {
+    fn apply(&self, window: &Window) {
+        let frozen = self.playing.get()
+            && !self.ui_visible.get()
+            && self.last_input.get().elapsed() >= FREEZE_INPUT_DEBOUNCE;
+        tracing::debug!(
+            target: "freeze",
+            "apply frozen={frozen} (playing={} ui_visible={})",
+            self.playing.get(),
+            self.ui_visible.get()
+        );
+        window.set_ui_frozen(frozen);
+    }
+
+    /// Local input: the UI is (about to be) visible again — unfreeze eagerly.
+    fn note_input(&self) {
+        self.last_input.set(Instant::now());
+        self.ui_visible.set(true);
+    }
+}
 
 #[derive(Properties, Default)]
 #[properties(wrapper_type = super::Application)]
@@ -84,6 +122,104 @@ impl ApplicationImpl for Application {
         window.set_property("decorations", self.decorations.get());
         window.set_underlay(&video);
         window.set_overlay(&webview);
+
+        // --- Freeze controller (IMPLEMENTATION_PLAN.md / DEVLOG §18): exclude the
+        // WebKit overlay from the render scene while playback is active and the
+        // player chrome is hidden, so GSK stops re-compositing the (software, on
+        // Nvidia) UI over the video every frame. Restored eagerly on any input;
+        // signals combine the injected `shell_ui` observer, playback state, and
+        // capture-phase input controllers. ---
+        let freeze = Rc::new(FreezeState {
+            playing: Cell::new(false),
+            ui_visible: Cell::new(true),
+            last_input: Cell::new(Instant::now()),
+        });
+
+        webview.connect_ui_visibility(clone!(
+            #[strong]
+            freeze,
+            #[weak]
+            window,
+            move |visible| {
+                tracing::debug!(target: "freeze", "shell_ui ui_visible={visible}");
+                freeze.ui_visible.set(visible);
+                freeze.apply(&window);
+            }
+        ));
+
+        video.connect_playback_started(clone!(
+            #[strong]
+            freeze,
+            #[weak]
+            window,
+            move || {
+                tracing::debug!(target: "freeze", "playback started");
+                freeze.playing.set(true);
+                freeze.apply(&window);
+            }
+        ));
+
+        video.connect_playback_ended(clone!(
+            #[strong]
+            freeze,
+            #[weak]
+            window,
+            move |_| {
+                freeze.playing.set(false);
+                freeze.apply(&window);
+            }
+        ));
+
+        // Eager local unfreeze on any input, captured before the WebView so the
+        // UI is back the same frame as the input that wakes stremio-web's
+        // controls (the WebView is never unmapped, so it still gets the event).
+        let motion = gtk::EventControllerMotion::new();
+        motion.set_propagation_phase(gtk::PropagationPhase::Capture);
+        motion.connect_motion(clone!(
+            #[strong]
+            freeze,
+            #[weak]
+            window,
+            move |_, _, _| {
+                freeze.note_input();
+                window.set_ui_frozen(false);
+            }
+        ));
+        window.add_controller(motion);
+
+        let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+        scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
+        scroll.connect_scroll(clone!(
+            #[strong]
+            freeze,
+            #[weak]
+            window,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, _, _| {
+                freeze.note_input();
+                window.set_ui_frozen(false);
+                glib::Propagation::Proceed
+            }
+        ));
+        window.add_controller(scroll);
+
+        let key = gtk::EventControllerKey::new();
+        key.set_propagation_phase(gtk::PropagationPhase::Capture);
+        key.connect_key_pressed(clone!(
+            #[strong]
+            freeze,
+            #[weak]
+            window,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, _, _, _| {
+                freeze.note_input();
+                window.set_ui_frozen(false);
+                glib::Propagation::Proceed
+            }
+        ));
+        window.add_controller(key);
 
         video.connect_playback_started(clone!(
             #[weak]
