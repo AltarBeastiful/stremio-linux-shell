@@ -201,9 +201,18 @@ Session 2026-07-19/20 (this branch, `develop`):
   Validated locally: noble + resolute + stonking build, install, and pass TEST 8.
 - **Step 3 DONE** — launcher WebKit warning (`data/stremio.sh`, + unit test) and
   the NVIDIA/decode section in `packaging/README.md`.
-- **Step 4 PENDING** — needs the NVIDIA box; runbook ready (see above).
+- **Step 4 DEFERRED** (user, 2026-07-20) — no NVIDIA box in reach this session;
+  runbook `packaging/nvidia-runtime-check.sh` is ready to run when one is. The
+  container smoke test already guards the *capability* (TEST 8) on every build;
+  only the on-hardware decode-mode/CPU A/B and the WebKit UI A/B remain.
 - **Step 5 BLOCKED** — SRU not landed (checked 2026-07-19, see above).
-- **Step 6 DEFERRED** — see above.
+- **Step 6 SKIPPED** (user, 2026-07-20) — release.yml TEST 8 already covers the
+  automatable regression guard; a self-hosted `[nvidia]` runner is high-setup for
+  the remaining hardware-only checks. Revisit if such a runner appears.
+
+Also validated 2026-07-20: the resolute .deb installs and runs on an AMD/Ubuntu
+26.04 box — app launches, launcher stays silent (no NVIDIA warning), SERVER_PATH
+resolves, idle CPU ~0.5% of a core. (AMD/Intel path; NVIDIA path is Step 4.)
 
 ## Quick reference
 - Force a decode mode (support/debug): `STREMIO_HWDEC=nvdec|auto-safe|auto-copy|no`.
