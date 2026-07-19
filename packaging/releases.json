@@ -3,12 +3,21 @@
     "codename": "noble",
     "version": "24.04",
     "feature": "api-4_14",
-    "note": "LTS, EOL 2029-05-31. GTK 4.14.5, libadwaita 1.5.0, WebKitGTK 2.52.3."
+    "expect_nvdec": true,
+    "note": "LTS, EOL 2029-05-31. GTK 4.14.5, libadwaita 1.5.0, WebKitGTK 2.52.3. libmpv2 0.37.0 (CUDA interop + ffnvcodec: audited 2026-07-19)."
   },
   {
     "codename": "resolute",
     "version": "26.04",
     "feature": "api-4_22",
-    "note": "LTS, EOL 2031-05-29. GTK 4.22.4, libadwaita 1.9.0, WebKitGTK 2.52.3."
+    "expect_nvdec": true,
+    "note": "LTS, EOL 2031-05-29. GTK 4.22.4, libadwaita 1.9.0, WebKitGTK 2.52.3. libmpv2 0.41.0 (CUDA interop + ffnvcodec: audited 2026-07-19)."
+  },
+  {
+    "codename": "stonking",
+    "version": "26.10",
+    "feature": "api-4_22",
+    "expect_nvdec": true,
+    "note": "Interim (beta, releases 2026-10-15). GTK 4.23.2, libadwaita 1.9.1, WebKitGTK 2.52.4 (already >= the NVIDIA fix floor). libmpv2 0.41.0 (CUDA interop + ffnvcodec: audited 2026-07-19). Reuses api-4_22."
   }
 ]

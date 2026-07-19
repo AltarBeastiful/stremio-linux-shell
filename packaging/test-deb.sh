@@ -25,13 +25,13 @@ command -v docker >/dev/null || { red "docker is required"; exit 1; }
 command -v jq >/dev/null || { red "jq is required"; exit 1; }
 
 only="${1:-}"
-mapfile -t rows < <(jq -r '.[] | [.codename, .version, .feature] | @tsv' "$RELEASES_JSON")
+mapfile -t rows < <(jq -r '.[] | [.codename, .version, .feature, (.expect_nvdec // false)] | @tsv' "$RELEASES_JSON")
 
 failures=0
 tested=0
 
 for row in "${rows[@]}"; do
-  IFS=$'\t' read -r codename version feature <<<"$row"
+  IFS=$'\t' read -r codename version feature expect_nvdec <<<"$row"
   [ -n "$only" ] && [ "$only" != "$codename" ] && continue
   tested=$((tested + 1))
 
@@ -90,11 +90,14 @@ for row in "${rows[@]}"; do
 
   # ---- verify, in a FRESH container of the same release --------------------
   echo "── verifying in a fresh ubuntu:$codename (no -dev packages present)"
+  # Mount the whole packaging/ dir (read-only) so verify-deb.sh can find its
+  # helper check-nvdec.sh next to itself. EXPECT_NVDEC comes from releases.json.
   if docker run --rm \
     -v "$OUT_DIR/$codename:/deb:ro" \
-    -v "$REPO_ROOT/packaging/verify-deb.sh:/verify-deb.sh:ro" \
+    -v "$REPO_ROOT/packaging:/pkg:ro" \
+    -e "EXPECT_NVDEC=$expect_nvdec" \
     ubuntu:"$codename" \
-    bash /verify-deb.sh /deb 2>&1 | sed 's/^/    /'
+    bash /pkg/verify-deb.sh /deb 2>&1 | sed 's/^/    /'
   then
     green "  $codename PASSED"
   else

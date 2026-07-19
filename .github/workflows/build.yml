@@ -36,6 +36,14 @@ jobs:
       - name: Build
         run: cargo build
 
+      # Hermetic unit test for the nvdec-capability detector used by the .deb
+      # smoke test (packaging/verify-deb.sh TEST 8). No Docker/apt: it drives
+      # check-nvdec.sh against fixture files. Guards the string markers and the
+      # exit-code contract so a refactor cannot silently break the regression
+      # guard that keeps NVIDIA copy-back from shipping.
+      - name: Packaging shell tests
+        run: bash packaging/check-nvdec.test.sh
+
   # Each packaging target pins the GTK/libadwaita/WebKitGTK API levels of one
   # Ubuntu release (see packaging/README.md). Type-check every set on every
   # push: using an API newer than a target ships still compiles here — this

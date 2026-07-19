@@ -31,6 +31,12 @@ EXPECTED_FILES=(
 )
 
 BIN=/usr/libexec/stremio/stremio
+# Whether this target is expected to support nvdec zero-copy on NVIDIA. Set from
+# releases.json's per-release "expect_nvdec" flag by the caller (test-deb.sh /
+# release.yml). When true, TEST 8 hard-fails a missing capability (regression
+# guard); otherwise it only warns. Accept true/1 as truthy.
+EXPECT_NVDEC="${EXPECT_NVDEC:-}"
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 fail=0
 
 deb=$(find "$DEB_DIR" -maxdepth 1 -name '*.deb' | head -1)
@@ -144,6 +150,34 @@ elif grep -q "x-scheme-handler/stremio" "$MIME"; then
   echo "   ok — x-scheme-handler/stremio maps to $(grep 'x-scheme-handler/stremio' "$MIME" | head -1)"
 else
   echo "   WARN — mimeinfo.cache exists but has no stremio:// handler"
+fi
+echo
+
+echo "── TEST 8: nvdec zero-copy capability (NVIDIA CPU fix)"
+# The app requests hwdec=nvdec on NVIDIA (src/app/video/mod.rs). That silently
+# degrades to copy-back (~100% CPU on 4K HDR) unless the distro's libmpv has
+# CUDA interop AND its libavcodec has ffnvcodec. check-nvdec.sh checks both
+# against the libraries this .deb just pulled in. FAIL only when the target is
+# flagged expect_nvdec (regression guard) — a blanket fail would block the .deb
+# for AMD/Intel users over an NVIDIA-only shortfall (see B2 in DEB-BUILD-PLAN).
+case "$EXPECT_NVDEC" in true|True|TRUE|1|yes) expect=1 ;; *) expect=0 ;; esac
+checker="$HERE/check-nvdec.sh"
+if [ ! -e "$checker" ]; then
+  echo "   WARN — check-nvdec.sh not found next to verify-deb.sh; skipping"
+  echo "          (mount the packaging/ dir, not just verify-deb.sh)"
+elif nv=$(bash "$checker" 2>&1); then
+  echo "   ok — nvdec zero-copy available (libmpv CUDA interop + ffmpeg ffnvcodec)"
+  sed 's/^/     /' <<<"$nv"
+else
+  sed 's/^/     /' <<<"$nv"
+  if [ "$expect" -eq 1 ]; then
+    echo "   FAIL — target is flagged expect_nvdec but nvdec is unavailable;"
+    echo "          NVIDIA users would regress to copy-back (~100% CPU on 4K HDR)."
+    fail=1
+  else
+    echo "   WARN — nvdec unavailable on this target; NVIDIA falls back to copy-back."
+    echo "          (not flagged expect_nvdec, so not a build failure.)"
+  fi
 fi
 echo
 

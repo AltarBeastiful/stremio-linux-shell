@@ -132,12 +132,16 @@ jobs:
           path: dist
 
       - name: Verify the package installs and runs on a clean system
+        # Mount the whole packaging/ dir so verify-deb.sh finds check-nvdec.sh.
+        # EXPECT_NVDEC comes from releases.json (via the matrix) — TEST 8 then
+        # hard-fails a missing nvdec capability only on targets flagged for it.
         run: |
           docker run --rm \
             -v "$PWD/dist:/deb:ro" \
-            -v "$PWD/packaging/verify-deb.sh:/verify-deb.sh:ro" \
+            -v "$PWD/packaging:/pkg:ro" \
+            -e "EXPECT_NVDEC=${{ matrix.target.expect_nvdec }}" \
             ubuntu:${{ matrix.target.codename }} \
-            bash /verify-deb.sh /deb
+            bash /pkg/verify-deb.sh /deb
 
   # Only publish once every target has installed and run somewhere clean.
   release-deb:
