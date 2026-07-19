@@ -11,7 +11,10 @@ use tokio::runtime::Runtime;
 
 use crate::{
     app::Application,
-    config::{DATA_DIR, GETTEXT_DIR_DEV, GETTEXT_DIR_FLATPAK, GETTEXT_DOMAIN, STARTUP_URL},
+    config::{
+        DATA_DIR, GETTEXT_DIR_DEV, GETTEXT_DIR_FLATPAK, GETTEXT_DIR_SYSTEM, GETTEXT_DOMAIN,
+        STARTUP_URL,
+    },
     server::Server,
 };
 
@@ -59,9 +62,12 @@ fn main() -> ExitCode {
 
     fs::create_dir_all(&data_dir).expect("Failed to create data directory");
 
-    let gettext_dir = match env::var("FLATPAK_ID") {
-        Ok(_) => GETTEXT_DIR_FLATPAK,
-        Err(_) => GETTEXT_DIR_DEV,
+    let gettext_dir = if env::var("FLATPAK_ID").is_ok() {
+        GETTEXT_DIR_FLATPAK
+    } else if fs::exists(GETTEXT_DIR_DEV).unwrap_or(false) {
+        GETTEXT_DIR_DEV
+    } else {
+        GETTEXT_DIR_SYSTEM
     };
 
     gettextrs::bindtextdomain(GETTEXT_DOMAIN, gettext_dir).expect("Failed to bind text domain");

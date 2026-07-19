@@ -1,0 +1,14 @@
+[
+  {
+    "codename": "noble",
+    "version": "24.04",
+    "feature": "api-4_14",
+    "note": "LTS, EOL 2029-05-31. GTK 4.14.5, libadwaita 1.5.0, WebKitGTK 2.52.3."
+  },
+  {
+    "codename": "resolute",
+    "version": "26.04",
+    "feature": "api-4_22",
+    "note": "LTS, EOL 2031-05-29. GTK 4.22.4, libadwaita 1.9.0, WebKitGTK 2.52.3."
+  }
+]
