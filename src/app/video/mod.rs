@@ -128,7 +128,14 @@ impl Video {
                     // to `auto-safe`, which uses such an interop when a known-good
                     // one is available and otherwise falls back to software
                     // decoding, so playback can never break.
-                    let value = if name == "hwdec" && value == "auto-copy" {
+                    //
+                    // EXCEPT on the proprietary Nvidia driver: the zero-copy path
+                    // there is `nvdec`/`cuda` interop, which produces video
+                    // artifacts (stale/torn frames) with 4K/HDR content. Keep the
+                    // safe copy-back path on Nvidia; only Mesa (VAAPI) zero-copy is
+                    // verified good.
+                    let is_nvidia = std::path::Path::new("/dev/nvidia0").exists();
+                    let value = if name == "hwdec" && value == "auto-copy" && !is_nvidia {
                         "auto-safe"
                     } else {
                         value
