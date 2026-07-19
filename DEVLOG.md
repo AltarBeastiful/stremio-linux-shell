@@ -1,0 +1,752 @@
+# Development Log — playback CPU fix & multi-distro Debian packaging
+
+This log covers the investigation and changes made on the `test/cpu-fix-deb`
+line of work: finding and fixing the dominant playback-CPU cost, packaging the
+result as `.deb`s for multiple Ubuntu releases, and validating it on real
+hardware and through the fork's release pipeline.
+
+For the crystallised decisions (and their alternatives), see
+[`ADR.md`](./ADR.md). This file is the narrative — including the paths we tried
+and rejected, which the ADR does not dwell on.
+
+---
+
+## 0. The runtime we are tuning
+
+Stremio's Linux shell is a GTK4/libadwaita app that draws the streaming web UI
+in a WebKitGTK overlay and the video in an OpenGL `GtkGLArea` underlay fed by
+libmpv's render API. A separate `node server.js` process (the closed-source
+streaming server) runs the torrent/HTTP engine on `:11470`.
+
+```mermaid
+flowchart LR
+  wrap["/usr/bin/stremio (wrapper)"] --> shell
+  subgraph shell["stremio shell process"]
+    gtk["GTK4 + libadwaita"]
+    wk["WebKitGTK — web UI overlay"]
+    mpvc["libmpv — video, GtkGLArea underlay"]
+  end
+  shell -->|spawns child| node["node server.js — :11470"]
+  wk <-->|IPC| mpvc
+  node -->|torrents / HTTP| net[("peers / streams")]
+```
+
+The playback CPU we care about is the **shell** process (compositing + decode);
+`server.js` is a separate concern investigated in §8.
+
+---
+
+## 1. Finding the dominant playback-CPU cost
+
+The starting complaint was high CPU during playback even though the video was
+hardware-decoded. Decode and the WebKit UI were ruled out; the cost was in the
+**GSK renderer**.
+
+GTK 4.14+ defaults to the **Vulkan** GSK renderer. Our video is an OpenGL
+`GtkGLArea`, and compositing a GL texture through the Vulkan renderer forces a
+per-frame **GL → Vulkan bridge** that dominates CPU.
+
+```mermaid
+flowchart LR
+  mpv["mpv (libmpv render API)"] -->|OpenGL texture| glarea["GtkGLArea underlay"]
+  glarea --> gsk{"GSK renderer"}
+  gsk -->|"Vulkan (default): per-frame GL→Vulkan bridge"| vk["GskVulkanRenderer<br/>~24% CPU"]
+  gsk -->|"GSK_RENDERER=gl: native GL compositing"| gl["GskGLRenderer<br/>~7.8% CPU"]
+  vk --> wl["Wayland surface"]
+  gl --> wl
+```
+
+Re-measured on an **idle** machine (AMD Radeon 680M / Mesa, 1080p30 H.264,
+`hwdec=vaapi` confirmed, GTK 4.22.4), 5 interleaved rounds per renderer, medians:
+
+| GSK renderer                    | Playback CPU |
+| ------------------------------- | ------------ |
+| unset → `GskVulkanRenderer`     | ~24%         |
+| `GSK_RENDERER=gl` → `GskGLRenderer` | **~7.8%** |
+| bare `mpv --vo=gpu`, same clip  | ~7.1%        |
+
+So on `gl` the whole GLArea/GSK path costs only ~0.7 points over mpv's own
+output; the Vulkan default adds ~17. Decode was never the issue.
+
+> **Measurement hygiene:** an earlier round (Vulkan ~52%, gl ~16%) was taken
+> while Chrome burned ~81% CPU and is inflated ~2×. Every measurement here
+> checks `/proc/loadavg` first — this box is a daily driver.
+
+---
+
+## 2. Why the renderer value is `gl`
+
+`GSK_RENDERER` is parsed by GTK's `get_renderer_for_name()`. Reading the actual
+source for our two target GTK versions (4.14.5 and 4.20.2):
+
+- `gl` **and** `opengl` → `GskGLRenderer`, no warning, on both versions.
+- `ngl` → same renderer but warns "renamed to gl" on 4.20+ (deprecated alias).
+- An **unrecognised** name → warning, then falls back to the default renderer —
+  which is **Vulkan**, the very thing we are avoiding.
+
+Conclusion: `gl` and `opengl` are interchangeable on GTK 4.14–4.22; `gl` is the
+name `GSK_RENDERER=help` lists, so that is what we set. Only an unrecognised
+value would silently cost us the fix.
+
+---
+
+## 3. How the fix evolved
+
+The fix changed shape three times as we reasoned about who it should apply to.
+
+```mermaid
+flowchart LR
+  v1["v1 — unconditional<br/>(set gl if unset)"] -->|"forces gl even<br/>with no GPU"| v2["v2 — vendor-gated<br/>(Nvidia + AMD)"]
+  v2 -->|"excludes Intel/nouveau,<br/>which share the cost"| v3["v3 — GPU-present<br/>(any GPU → gl)"]
+```
+
+**v1 — unconditional.** `main.rs` set `GSK_RENDERER=gl` whenever it was unset.
+Simple and effective, but forces GL even where there is no GPU, and reads as a
+blunt global override.
+
+**Comparing with upstream.** Two upstream touchpoints were checked:
+
+- **PR #69** ("Fix video acceleration with VA-API for Intel") is **orthogonal**:
+  it passes `RenderParam::WaylandDisplay` into mpv's render context so the
+  VA-API *decoder* can reach the Wayland display. It does not touch the GSK
+  compositor renderer.
+- **Commit `638b5af`** is the real overlap: `data/stremio.sh` exports
+  `GSK_RENDERER=opengl` **only when `/dev/nvidia0` exists**, and only in the
+  launcher script (Flatpak, and our deb's `/usr/bin/stremio`).
+
+So upstream reached the same conclusion but scoped it to **Nvidia only**, in the
+wrapper.
+
+**v2 — vendor-gated (Nvidia + AMD).** To mirror upstream's targeting while
+covering our measured AMD case, detection was moved into the binary and gated to
+`/dev/nvidia0` **or** the AMD PCI vendor id (`0x1002`). Intel and nouveau were
+left on GTK's default "because unmeasured."
+
+**v3 — GPU-present (the current design).** That exclusion was the wrong kind of
+conservatism. Intel and nouveau are Mesa drivers, structurally identical to AMD
+in how GTK bridges a GL `GLArea` into the Vulkan renderer — so they almost
+certainly pay the same cost. And the GL renderer composites the GLArea
+*natively*, with no bridge, so it cannot be **slower** on any GPU for this
+workload. The only real risk is a driver-specific GL visual quirk, not CPU.
+
+The final rule: **prefer `gl` whenever a GPU is present**, leaving only GPU-less
+software rendering on GTK's default, and always yielding to an explicit
+`GSK_RENDERER`. This covers AMD, Intel, nouveau and Nvidia alike, in every
+package.
+
+---
+
+## 4. GPU detection module and its test
+
+`src/gpu.rs` (std-only) owns the decision:
+
+```rust
+pub fn preferred_gsk_renderer() -> Option<&'static str> {
+    has_gpu().then_some("gl")   // /dev/nvidia0 || any /sys/class/drm/cardN
+}
+```
+
+`main.rs` applies it before GTK initialises, only if `GSK_RENDERER` is unset:
+
+```rust
+if env::var_os("GSK_RENDERER").is_none()
+    && let Some(renderer) = gpu::preferred_gsk_renderer()
+{
+    unsafe { env::set_var("GSK_RENDERER", renderer) };
+}
+```
+
+**Testing was TDD, without unit tests.** `packaging/test-gsk-renderer.sh` is a
+*differential* test: it recomputes the decision independently in shell from the
+same OS facts (`/dev/nvidia0`, `/sys/class/drm/cardN`) and asserts the real
+detection code agrees. The code is exercised through `examples/gpu_probe.rs`,
+which `#[path]`-includes `src/gpu.rs` and is compiled standalone with
+`rustc --edition 2024` — no cargo, no GTK/mpv tree, no display, no fixtures. It
+runs on real hardware and confirms the fix actually fires (e.g. prints `gl` on
+AMD). The test was written first (red: `src/gpu.rs` absent), then made green.
+
+---
+
+## 5. Multi-distro `.deb` packaging
+
+Packaging targets are data, not code. `packaging/releases.json` maps each Ubuntu
+release to a Cargo feature set; both CI (`.github/workflows/release.yml`) and the
+local harness (`packaging/test-deb.sh`) read that one file.
+
+| Release | Feature set | GTK / libadwaita / WebKitGTK |
+| ------- | ----------- | ---------------------------- |
+| 24.04 noble    | `api-4_14` | 4.14.5 / 1.5.0 / 2.52.3 |
+| 26.04 resolute | `api-4_22` | 4.22.4 / 1.9.0 / 2.52.3 |
+
+Key packaging choices (detailed in ADR-0002):
+
+- **One deb per release, built in a container of that release**, so cargo-deb's
+  `$auto` resolves `Depends` via `dpkg-shlibdeps` against the libraries that
+  release actually ships. A hand-pinned `Depends` produced a deb that could not
+  install on 24.04 at all.
+- **Verified by installing into a *fresh* container** of the same release — the
+  only way to catch a deb that names packages which do not exist (dpkg-shlibdeps
+  invents `libgtk-4` from the SONAME when `-dev` packages are absent).
+- `nodejs` is added to `Depends` by hand (`$auto` can't see it — it's not
+  linked); `desktop-file-utils` + `hicolor-icon-theme` are `Recommends`, driven
+  by dpkg file triggers for URL-scheme and icon registration.
+- **Ubuntu 22.04 is impossible**, not skipped: `webkit6`'s generated bindings
+  reference `gtk::Accessible` (needs GTK v4_10+), and 22.04 ships GTK 4.6.
+
+---
+
+## 6. Validation on real hardware
+
+Built the resolute deb natively (`cargo deb --deb-revision 1~ubuntu26.04 --
+--no-default-features --features api-4_22`), installed it over the running
+instance, and confirmed the fix end-to-end:
+
+```
+Environment variable GSK_RENDERER=gl set, trying GskGLRenderer
+Using renderer 'GskGLRenderer' for surface 'GdkWaylandToplevel'
+```
+
+CPU during real playback (even with the box contaminated — loadavg ~4–5, 85
+Chrome processes): **shell 6.8%**, `node server.js` **0.0%** — squarely in the
+GL band, nowhere near the ~24% Vulkan default.
+
+> **Gotcha — verifying env vars:** `/proc/<pid>/environ` shows the environment
+> at `exec` time only. `env::set_var` (glibc `setenv`) adds the variable on the
+> heap *after* exec, so it never appears there. The renderer must be verified via
+> `GSK_DEBUG=renderer`, not `/proc/environ`.
+
+> **Gotcha — orphaned streaming server:** force-killing the shell orphans its
+> `node server.js` child, which keeps holding `:11470`. A later shell then can't
+> bind a clean server and playback sits at "0 peers". A normal quit cleans the
+> child up; external `kill`s during testing do not. Cure: kill the shell **and**
+> all `stremio` node servers, then relaunch one clean pair.
+
+---
+
+## 7. Fork release for cross-GPU testing
+
+To test on non-AMD hardware, the commit was pushed to the fork and released as
+`v1.1.2-cpu-deb-test2`, which triggers `.github/workflows/release.yml`: build one
+deb per release in a container, verify each in a fresh container, attach to the
+release (plus a Flatpak). All jobs green; both debs verified installable on
+stock 24.04 and 26.04.
+
+The open question this release exists to answer: is the broad GL default safe on
+**Intel / nouveau / Nvidia**, or does forcing GL expose a driver-specific visual
+quirk? Per-machine check: `GSK_DEBUG=renderer stremio` should log
+`GskGLRenderer`, then confirm the picture, fullscreen/scaling, and CPU.
+
+---
+
+## 8. Related investigations (concluded, no code change here)
+
+- **`server.js` is not a CPU bottleneck.** Profiled during live 4K streaming:
+  ~94% idle, <1% in Stremio's own code — it is I/O-bound (blocked in `epoll`),
+  not transcoding (no ffmpeg). The earlier high number was CPU contention. A
+  Bun/Rust ("stream-server") swap would win on memory/startup/no-node-dep, not
+  on playback CPU; it is closed-source so not patchable here. WASM is a non-start
+  for a BitTorrent engine (no raw TCP/UDP in the browser sandbox).
+- **VLC-in-Flatpak isn't offered as an external player.** Detection lives in the
+  closed-source `server.js`, which probes fixed paths (`/usr/bin/vlc`, …) with
+  `fs.existsSync` — it can't see a Flatpak VLC, and the "Play in VLC" action is a
+  literal `child.exec`, not an XDG portal call. Filed as an upstream issue; not
+  fixable in this shell.
+- **KDE menu "missing" entry** was a desktop-ID collision with a Flatpak install
+  (XDG_DATA_DIRS precedence), not a packaging bug.
+
+---
+
+## 9. Current state & next step
+
+- `src/gpu.rs`, `main.rs` wiring, `examples/gpu_probe.rs`, and
+  `packaging/test-gsk-renderer.sh` are committed on `test/cpu-fix-deb`.
+- The open PR (`fix/playback-cpu`) is deliberately **untouched**; the code commit
+  is a clean cherry-pick once cross-GPU testing confirms the broad default.
+- Awaiting Intel / nouveau / Nvidia results from the `test2` release.
+
+---
+
+## 10. The Nvidia gap: `gl` is necessary but not sufficient
+
+The `test2` release (§7) was meant to answer "is forcing `gl` safe on Nvidia?".
+Testing it on the Nvidia box (GTX 1060, driver 580, KDE Plasma 6 / Wayland)
+answered a bigger question instead: **on Nvidia the `gl` renderer is not enough
+— a full CPU core is still pinned during playback, and the picture shows
+compositing artifacts.**
+
+Measured with the resolute deb (which already forces `gl` via both `gpu.rs` and
+the wrapper), 1080p/4K playback, hardware-decoded:
+
+| Machine                      | Renderer | Playback CPU (shell) | Artifacts |
+| ---------------------------- | -------- | -------------------- | --------- |
+| AMD 680M (Mesa) — §1          | `gl`     | ~7.8% (≈ mpv alone)  | none      |
+| **Nvidia GTX 1060 (prop.)**   | `gl`     | **~100% of one core**| **yes**   |
+
+Every GSK renderer and window backend was ruled out on Nvidia — all identical:
+
+| Renderer / backend      | Main-thread CPU | Notes |
+| ----------------------- | --------------- | ----- |
+| `opengl` / Wayland       | ~90–100%        | wrapper default |
+| `ngl` / Wayland          | ~85–98%         | new GL renderer |
+| `vulkan` / Wayland       | ~95–103%        | GTK 4.22 default |
+| `opengl` / XWayland      | ~96–100%        | forced X11 backend |
+
+The cost is one **single-threaded** core (system-wide ~18% busy on a 12-thread
+box, load ~1.2). Per-process GPU counters during playback: **NVDEC `dec` ~12%**
+(decode is on the GPU ✓) and **shaders `sm` ~12%** — the GPU is *lightly* loaded
+while the CPU core is pinned. So this is neither software video decode (the
+`av:hevc` threads are idle, `cuda-EvtHandlr` is present) nor a Vulkan bridge (the
+`gl` renderer has no bridge). Something on the main thread is spending a core
+while the GPU idles.
+
+> The old spin-loops (§ pre-`8aeb9bb`) were already ruled out: with the
+> `timeout`/`spawn_local` loops, the menu sits at ~1–3% CPU. The pegged core only
+> appears once the player view (the `GtkGLArea`) is realised **and** playing.
+
+The `glarea_probe` (PR #108's benchmark: `GtkGLArea` + libmpv render, **no
+WebKit**) run on the Nvidia box with a 4K/10-bit HEVC clip isolates the two
+halves of the cost:
+
+| Probe (no WebKit), 4K HEVC, Nvidia | CPU | fps |
+| ---------------------------------- | --- | --- |
+| decode only (`hwdec=nvdec`)         | ~2.2% | — |
+| `GSK_RENDERER=vulkan` compositing   | **~49.5%** | 30 |
+| `GSK_RENDERER=gl` compositing       | not measurable unattended (frame clock throttles an unfocused window to ~1 fps) | 1 |
+
+Two takeaways: **decode is trivially cheap** (nvdec, ~2%), and **the Vulkan GSK
+renderer alone costs ~50% at 4K on Nvidia** even without WebKit — so the `gl`
+default matters for the video path on Nvidia too, not just AMD (DEVLOG §1). The
+`gl` figure needs a focused window (a hardware session) to measure; the probe
+also confirms the *residual* pinned core in the full app (§11) is **not** in this
+GLArea path — it is the WebKit overlay recomposite.
+
+## 11. Root cause on Nvidia: WebKit renders the UI in software
+
+`perf` (DWARF) on the pinned main thread — self cost, not children:
+
+| Cost | Symbol | Meaning |
+| ---- | ------ | ------- |
+| ~6%  | `__memmove_avx_unaligned_erms` (libc) | a per-frame CPU **memory copy** |
+| ~1–2% | `libpixman` | cairo's **software** rasteriser |
+| ~8–10% | `libnvidia-eglcore` (fragmented) | GL upload / composite |
+| ~8%  | kernel | syscalls around the above |
+
+Not a driver spin — **data movement + software compositing**. `GDK_DEBUG=offload`
+named it exactly. Every video frame:
+
+```
+[webview subsurface] 🗙 Only textures supported (found GskCairoNode)
+```
+
+The window is a `GtkOverlay`: the video `GtkGLArea` is the base child, the
+WebKitGTK web UI is a full-window **transparent** overlay on top (the code even
+wraps that overlay in `GtkGraphicsOffload`). On Nvidia, **WebKitGTK's GTK4 port
+fails to bring up its Skia *GPU* context and falls back to the Skia *CPU*
+worker**, so the web UI snapshots to a `GskCairoNode` — a software surface. Then:
+
+```mermaid
+flowchart LR
+  mpv["mpv → GtkGLArea (GPU texture)"] --> gsk["GSK composite (per video frame)"]
+  wk["WebKit UI"] -->|"Nvidia: Skia GPU fails → CPU"| cairo["GskCairoNode (software)"]
+  cairo --> gsk
+  gsk -->|"upload cairo surface (memmove) + blend (eglcore)"| out["window surface"]
+```
+
+Because the software UI **overlaps** the video and the video changes every frame,
+GSK re-uploads and re-composites that cairo surface on the CPU 60×/second. On
+Mesa (AMD/Intel/nouveau) Skia GPU works → the UI is a **texture** node → GSK
+composites it on the GPU → cheap. **That single difference — WebKit GPU vs CPU
+rendering — is the entire Nvidia-vs-AMD split, and the `gl` renderer cannot touch
+it because the cost lives inside WebKit, upstream of GSK.**
+
+Context — and one thing to *not* mis-cite:
+
+- [WebKitGTK 2.46 switched Cairo → Skia](https://blogs.igalia.com/carlosgc/2024/09/27/graphics-improvements-in-webkitgtk-and-wpewebkit-2-46/), with **GPU rendering the default and a CPU (threaded-Skia) fallback**. Whether the GPU path comes up "depends on … the driver version, the kernel version, the system compositor, the EGL extensions available." On the proprietary Nvidia driver it comes up as the **CPU** worker here — hence the `GskCairoNode`.
+- [bugs.webkit.org #228268](https://bugs.webkit.org/show_bug.cgi?id=228268) is **RESOLVED/FIXED** — but it covers the *old* GTK4-Nvidia **blank-screen** regression (a depth-32 X11 visual with no alpha), **not** today's Skia-GPU-won't-init-on-Nvidia behaviour. Do not file this CPU issue as a dup of #228268.
+- There is **no documented env var to force the Skia GPU path up on Nvidia**; `WEBKIT_DISABLE_DMABUF_RENDERER=1` only pushes further toward software.
+
+> **Prove it on any box:** open **`webkit://gpu`** (or `webkit://gpu/stdout`) in
+> the WebView — it reports the active rendering backend, i.e. whether Skia is on
+> GPU or CPU. This is the definitive check for "is WebKit software-rendering here".
+
+**Upstream awareness (as of 2026-07):** the project already fixed the *GSK*
+half — commit `638b5af` forces `GSK_RENDERER=opengl` on `/dev/nvidia0`, and open
+**PR #108** generalises `gl` to all GPUs (measured ~24% → ~7.8% on AMD, refs
+issue **#103**). But **no upstream issue or PR addresses the WebKit
+software-render recomposite, the ineffective `GtkGraphicsOffload`-around-a-WebView,
+or fractional-scaling defeating offload** — that is the ground this work owns.
+Issue **#77** (SIGSEGV inside `libnvidia-glcore`/`libnvidia-eglcore`, one frame in
+the `WebKitWebProcess` child) is separate corroboration that the GL/EGL handoff in
+this overlay/underlay design is fragile on the proprietary driver.
+
+**What did not work** (each verified live — the webview stayed a `GskCairoNode`
+and playback CPU stayed ~80–100%; note these were on a *debug* build, so absolute
+numbers are inflated but the node-type verdict is build-independent):
+
+| Attempt | Result |
+| ------- | ------ |
+| `settings.set_hardware_acceleration_policy(Always)` | still `GskCairoNode` |
+| move `GtkGraphicsOffload` from webview → video `GtkGLArea` | `Lowering because a GskCairoNode overlaps` — offload defeated by the software overlap, CPU unchanged |
+| `WEBKIT_DISABLE_DMABUF_RENDERER=1` | still `GskCairoNode` |
+| `WEBKIT_FORCE_SANDBOX=0` | still `GskCairoNode` |
+
+A second, independent blocker turned up in the same trace: with the display at
+**170 % fractional scale**, offload also reports `Non-integral device
+coordinates`. This is by design — [GTK **declines to offload at fractional
+scales**](https://blog.gtk.org/2024/04/17/graphics-offload-revisited/) ("integral
+device pixel positions are needed"). So on this exact machine, even a *texture*
+video node **cannot** be offloaded to a subsurface until the scale is integer
+(100 %/200 %) — a hard constraint the fix below has to account for.
+
+> **Verified fix candidate needs a dmabuf video path.** `GtkGraphicsOffload` only
+> offloads a widget whose content is a single **dmabuf** texture. A `GtkGLArea`
+> renders into a GL FBO (a `GskGLTextureNode`, not a scanout dmabuf), which is why
+> offloading it "lowers" but never truly hands the frame to the compositor. See
+> [ADR-0003](./ADR.md) for the proposed rework.
+
+## 12. A second, separate bug: `hwdec=auto-safe` artifacts on Nvidia
+
+The artifacts are **not** the same bug as the CPU. They reproduce on the **deb**
+but **not** on the upstream **stable Flatpak** — even though both run the same
+GTK 4.22.4 / libmpv 2.5.0 and both hit the WebKit-cairo path above. The
+difference is code, and it narrows to one branch-only change.
+
+`a7597b7 "fix(video): enable hardware decoding by default"` sets
+`hwdec=auto-safe` in the mpv initialiser **and** remaps the web UI's deliberate
+`hwdec=auto-copy` request to `auto-safe` (`video/mod.rs:131`). `auto-safe` uses
+the **zero-copy** GPU interop; `auto-copy` copies frames back through system
+memory. That commit was verified on **VAAPI/Mesa only** ("Using EGL dmabuf
+interop via `GL_OES_EGL_image` … Initialized VAAPI") — never on Nvidia's
+nvdec/CUDA-GL interop, which is exactly where the zero-copy path is fragile.
+
+Upstream `main` sets no `hwdec` (so the web UI's `auto-copy` stands), which is why
+the stable Flatpak decodes copy-back and shows no artifacts. **Forcing zero-copy
+on Nvidia is the regression** — and it is not local to this branch: the same two
+commits (`a7597b7` + the `c1123bc` remap) ride in **upstream PR #108**, so if that
+PR merges as-is it ships the Nvidia artifacts to the official Flatpak. Not yet
+re-tested with `auto-copy` on the Nvidia box (needs a playback session); the fix
+direction is in [ADR-0003](./ADR.md).
+
+## 13. The Flatpak launcher regression (fixed)
+
+While reproducing on the deb, the devel Flatpak would not start:
+
+```
+/app/bin/stremio: line 12: /usr/libexec/stremio/stremio: No such file or directory
+```
+
+`e6fb216 "build: add deb package"` had moved the launcher's env exports into
+`data/stremio.sh` and hardcoded them to `/usr/libexec` — correct for the deb, but
+the Flatpak installs the binary and `server.js` under `/app`. The same commit also
+dropped the manifest's `--env=SERVER_PATH=/app/...` that had masked it. Both
+packages install the wrapper at `<prefix>/bin/stremio`, so the wrapper now
+derives its prefix from its own path (`$0` → `.../bin/stremio` → prefix) and one
+file serves both. Committed on `build/deb-multi-distro` (where the regression was
+introduced) as `fix(flatpak): derive install prefix in the launcher so it works
+in /app`.
+
+## 14. Cross-platform regression audit
+
+Comparing the branch against upstream `main`, change by change:
+
+| Change | On `main`? | Regression risk |
+| ------ | ---------- | --------------- |
+| `gpu.rs` → force `GSK_RENDERER=gl` when a GPU is present | no | Low. Measured better on AMD; same renderer upstream already forces for Nvidia. **Unverified visual behaviour on Intel/nouveau** (ADR-0001 risk). |
+| `8aeb9bb` timeout/`spawn_local` event+render loops | no | **Improvement, not a regression** — `main` still busy-polls with `idle_add_local` (a pegged core at idle). |
+| `a7597b7` + remap → force `hwdec=auto-safe` | no | **Regression on Nvidia** (§12 artifacts). Verified on Mesa only. |
+| `ca9afe8` `WaylandDisplay` render param (VA-API) | yes | Upstream; not implicated. |
+| `638b5af` `opengl` for `/dev/nvidia0` in wrapper | yes | Upstream; `gl == opengl`. |
+| `data/stremio.sh` prefix-relative (§13) | new | None — deb resolves to `/usr` exactly as before; only adds the `/app` case. |
+
+Net: one real regression (`hwdec=auto-safe` on Nvidia), one silent improvement
+(the loop fix), and one unverified-but-reasoned default (`gl` on Intel/nouveau).
+
+## 15. Where this leaves us
+
+- **AMD/Mesa:** genuinely fixed by `gl` (24% → ~8%). Keep it.
+- **Nvidia CPU:** an upstream WebKitGTK limitation (software UI rendering), not
+  fixable in `gpu.rs`. The shell's only real lever is to stop compositing the UI
+  over the video every frame — i.e. put the **video** on its own compositor
+  subsurface via a dmabuf paintable, so video frames bypass GSK entirely and the
+  software UI is only re-composited when *it* changes. See [ADR-0003](./ADR.md).
+- **Nvidia artifacts:** a self-inflicted `hwdec` regression; revert/limit
+  `auto-safe` on the Nvidia interop.
+- Next hardware session (playback required): confirm `auto-copy` clears the
+  artifacts, and run the §16 experiment to pick the ADR-0003 mechanism.
+
+---
+
+## 16. Rejecting the subsurface fix, and a better direction
+
+The first cut of [ADR-0003](./ADR.md) proposed putting the video on its own
+Wayland subsurface (`GtkGraphicsOffload` + a dmabuf paintable). That is
+**rejected**: [GTK declines to offload at fractional
+scales](https://blog.gtk.org/2024/04/17/graphics-offload-revisited/), and
+fractional scaling is far too common to ship a fix that silently no-ops for those
+users. Anything subsurface-based is out.
+
+Two findings reframe the fix as scale-independent:
+
+**1. `glarea_probe` isolates the halves.** The probe (GLArea + libmpv, *no
+WebKit*) on the Nvidia box, 4K/10-bit HEVC:
+
+| Probe, no WebKit | CPU |
+| ---------------- | --- |
+| decode (`hwdec=nvdec`) | ~2.2% |
+| `GSK_RENDERER=vulkan` composite (4K) | ~49.5% |
+| `GSK_RENDERER=gl` composite | not measurable unattended (frame clock throttles an unfocused window to ~1 fps) |
+
+So decode is trivially cheap and the *GLArea* path is not the residual pinned
+core — the WebKit overlay is.
+
+**2. `webkit://gpu` names the WebKit cause.** A standalone probe
+(`examples/webkit_gpu.rs`, added this round) loads `webkit://gpu/stdout`:
+
+```
+"Hardware Acceleration Information": { "Policy": "never", ... }
+```
+
+WebKit's hardware-acceleration **policy defaults to `never`** here (`webkit6`
+exposes only `Always`/`Never`), so it does no accelerated compositing — the UI is
+software. Setting `Always` is *necessary* but, in the shell, was **not
+sufficient**: the transparent overlay still snapshotted to `GskCairoNode` during
+playback. So the shell can't simply flip a WebKit switch.
+
+**The reframed fix (ADR-0003 v2):** the waste is re-processing an **unchanging**
+UI at video frame rate. Kill *that*, inside one GSK surface (no subsurface, so
+any scale, any driver): either **cache the UI as a `GdkTexture`** and refresh it
+only when the UI actually changes (per-frame cost → a GPU blend), or **skip the
+idle transparent overlay** entirely until UI activity. Both are scale-independent
+and help every driver.
+
+**The one experiment left for hardware** (`webkit_gpu.rs` is the harness): with a
+*focused* window and `Policy=Always`, does the WebView's `invalidate-contents`
+fire **every frame** (WebKit/GTK re-snapshotting it) or only on real UI change? If
+every frame, caching won't help and the repaint must be stopped; if only on
+change, the texture-cache is the clean fix. That single answer picks the
+mechanism.
+
+## 17. Measuring the fix: `CachedOverlay` vs a synthetic reproduction
+
+Rather than wait for a hardware playback session to answer §16, I built a
+micro-benchmark that reproduces the *shape* of the bug without WebKit or a video:
+`examples/overlay_bench.rs`. It is a `GtkOverlay` whose underlay is a `GtkGLArea`
+re-rendering every frame (standing in for the video) and whose overlay is a
+software UI. Only the compositor moves, so the CPU delta between modes **is** the
+per-frame overlay-compositing cost. Modes:
+
+- `none` — no overlay (floor: the churning underlay alone)
+- `cairo` — a `GtkDrawingArea`; its snapshot is a `GskCairoNode`, the exact node
+  WebKit produces in software on Nvidia
+- `cached` — that same DrawingArea wrapped in the **real** `CachedOverlay`
+  (included via `#[path]`, so the benchmark exercises production code)
+- `texture` — the same pixels pre-rasterised to a `GdkTexture` (the ideal: a
+  guaranteed GPU blit per frame)
+
+Measured on the Nvidia box (GTX 1060, `GSK_RENDERER=gl`, 8 s per run, self CPU
+from `/proc/self/stat`):
+
+| size | mode | CPU% | fps |
+| ---- | ---- | ---- | --- |
+| 1280×720  | none    | 20.5 | 60 |
+| 1280×720  | cairo   | **62.6** | 60 |
+| 1280×720  | cached  | **17.5** | 60 |
+| 1280×720  | texture | 18.6 | 60 |
+| 2560×1440 | none    | 19.6 | 60 |
+| 2560×1440 | cairo   | **94.6** | **21** |
+| 2560×1440 | cached  | **19.6** | 60 |
+| 2560×1440 | texture | 20.2 | 60 |
+
+Three things fall out:
+
+1. **The root cause is confirmed and it is compositing, not repaint.** With a
+   `child_invals` counter attached (a passive `WidgetPaintable` observer), the
+   `cairo` overlay's contents invalidate **0** times over 8 s yet it still costs
+   ~90% of a core at 1440p. GSK re-processes the *unchanging* software cairo node
+   **every frame**. This is the §16 open question answered: the waste is GSK
+   re-uploading an unchanged node, not the WebView being re-snapshotted — so
+   **caching is the right mechanism.**
+2. **`CachedOverlay` reaches the ideal floor.** `cached ≈ texture ≈ none` at both
+   sizes — the current `WidgetPaintable::current_image()` implementation already
+   composites as a GPU texture node; no `render_texture` rewrite is needed.
+3. **The win grows with resolution.** At 1440p the software path saturates a core
+   *and drops the video to 21 fps* (the user's "framerate is low" + pinned-core
+   symptom); the cache holds a full 60 fps at the no-overlay cost. The user runs
+   4K/170%, where the gap is larger still.
+
+**Worst-case stress.** A `BENCH_CHILD_DIRTY=1` knob makes the overlay child
+`queue_draw()` every frame — the pessimistic model of WebKit repainting
+continuously. Even then `cached` stayed at **21.9% / 60 fps** vs `cairo`'s
+**93.6% / 20 fps** at 1440p. So the fix does not collapse to the software cost
+even if the UI animates. (Caveat: a `queue_draw` on a widget the overlay never
+renders is not identical to WebKit pushing new frames; the real-playback A/B —
+does the seekbar/subtitle/spinner refresh *through* the cache — is still worth
+running, and remains the last hardware check.)
+
+This does not replace the hardware test, but it de-risks it substantially: the
+compositing mechanism, the fix, and its scaling are now measured on real Nvidia
+hardware, and `CachedOverlay` is confirmed optimal for the dominant (idle-UI)
+case. `overlay_bench` stays in the tree as a runnable regression harness.
+
+### Refactor from the measurements
+
+- Added `examples/overlay_bench.rs` (the harness above).
+- `CachedOverlay` now also restales its cache on a **size change**
+  (`size_allocate` tracks the last size), so a resize/DPI change re-captures at
+  the new size instead of stretching a stale texture. Covered by a new unit test
+  (`a_size_change_restales_the_cache`). No perf refactor was warranted — the
+  benchmark shows the compositing path is already at the texture floor.
+
+## 18. `CachedOverlay` falsified on hardware; pivot to `FreezeOverlay`
+
+The real-playback A/B (the "last hardware check" §17 flagged) was run on the
+GTX 1060 (driver 580.159.03) at 170% scale. **`CachedOverlay` renders a black
+UI on the real WebView** — in both the default dmabuf and
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` (software) modes. A hover tooltip still fires,
+so the WebView is live and hit-testing; its pixels just never paint. Root cause:
+`WidgetPaintable::current_image()` **rasterizes the WebView's node tree empty** —
+WebKit presents its content through a path the GSK rasterizer cannot capture.
+CPU was low (~6% vs the default path's ~54% on the idle Board) *because it was
+compositing a blank texture*. The `overlay_bench` "cached ≈ texture" result is
+real but does not transfer to the WebView: the bench child is a `GtkDrawingArea`
+that draws through GTK `snapshot()`, so it caches fine. **The entire
+snapshot-cache family is dead for a WebView overlay** (see `ADR.md` ADR-0003
+Update 2026-07-18, `BENCHMARKS.md`).
+
+Parallel research also closed the alternatives: dmabuf/`GtkGraphicsOffload` of the
+video is fundamentally blocked at fractional scale (`fractional-scale-v1` /
+`scaled_rect_is_integral`), `KWIN_USE_OVERLAYS` is a client-side red herring, and
+no WebKit/GTK/runtime bump carries a fix (WebKit-GPU-on-Nvidia is upstream
+WONTFIX). Fractional scale is a hard product requirement, so integer-scale-only
+fixes are out.
+
+**New direction — `FreezeOverlay` (see `IMPLEMENTATION_PLAN.md`, LOCKED).** The
+one lever left: remove the UI's render nodes from the per-frame scene *while the
+UI is invisible* (most of playback — controls auto-hide, the overlay is fully
+transparent, and subtitles are mpv-rendered, not web-rendered:
+`set_enable_media(false)` in `webview/imp.rs` + mpv `sid`/`sub-*` in
+`video/config.rs`). A wrapper whose `snapshot()` early-returns while frozen
+contributes zero nodes → the renderer never touches the WebView → video-only
+floor, at any scale, on any driver — while the WebView stays mapped (keeps
+input, focus, timers). The failed CachedOverlay run is itself the proof: dropping
+the WebView node took live CPU 54%→6%.
+
+### Greenlight (2026-07-18)
+
+- App builds/runs/navigates on the box (driven via the desktop MCP: launched the
+  release build, opened The Dark Knight's detail page from Continue Watching).
+- Behavioural premise confirmed: video/subtitles are mpv-rendered (media APIs
+  disabled in the WebView), controls auto-hide (the detail-page header
+  auto-hid/immersed when the pointer went idle), so a "UI fully invisible during
+  playback" state exists and is the steady state — exactly what `FreezeOverlay`
+  targets. **Greenlit.**
+- Deferred to Step 5: pinning the exact stremio-web player-chrome DOM anchors for
+  the `shell_ui` observer — to be taken from stremio-web *source* (reproducible;
+  the shell loads hosted `web.stremio.com`, so anchors are version-fragile and the
+  observer is designed fail-visible + heartbeat regardless).
+
+## Lessons learned — launching the shell for live testing
+
+**Symptom.** The app opens and the UI renders, but starting any title never
+connects to the streaming server — playback never begins (looks like "no peers"
+even when the torrent has seeds).
+
+**Cause — a port collision, not the content.** `STARTUP_URL` is hardcoded to
+`http://127.0.0.1:11470/...` (`src/config.rs`), but `data/server.js` binds the
+**next free port starting at 11470** and increments if it's taken. Two things
+conspire:
+- Leftover `node data/server.js` processes from earlier runs squat 11470/11471,
+  so a freshly-launched shell's own server binds 11472 (or higher) — while the
+  WebView keeps calling **:11470**, which is a *different* (or dead) server.
+- **Killing the shell PID orphans its server child.** The shell spawns
+  `node server.js` (`src/app/server.rs`), and because we launch with `setsid`
+  (to dodge the sandbox's SIGSTKFLT on GUI procs) the node child is detached into
+  its own session — `kill <shell-pid>` does **not** take it down. Orphans pile up
+  across launch/kill cycles and keep squatting 11470+.
+
+**Proper restart procedure.**
+1. Clear every leftover so :11470 is free (kill the server children too, not just
+   the shell):
+   ```sh
+   pkill -9 -f 'target/release/stremio-linux-shell'
+   pkill -9 -f 'data/server.js'      # or: kill -9 the specific node PIDs
+   ```
+   (In this sandbox `pkill` sometimes returns 144/SIGSTKFLT before finishing —
+   re-check and kill remaining PIDs explicitly.)
+2. Verify nothing holds the port: `ss -ltnp | grep 11470` → **must be empty**.
+3. Launch a **single** instance. Either the documented dev run
+   `cargo run --release` (which sets `SERVER_PATH`/`LC_NUMERIC` via
+   `.cargo/config.toml`), or the release binary directly with the env set:
+   ```sh
+   LC_NUMERIC=C SERVER_PATH="$PWD/data/server.js" GSK_RENDERER=gl \
+     setsid ./target/release/stremio-linux-shell >/tmp/stremio.log 2>&1 < /dev/null &
+   ```
+   `LC_NUMERIC=C` is mandatory (else `mpv_create` returns Null); `GSK_RENDERER=gl`
+   for Nvidia.
+4. **Confirm the shell's own server owns :11470**:
+   `ss -ltnp | grep 11470` → a `node` bound to `*:11470`. Only then will
+   playback connect.
+5. To stop cleanly and avoid orphans, kill the whole session/group (or always
+   follow the shell kill with `pkill -f 'data/server.js'`).
+
+Key takeaway: **always start from a clean slate and verify the server is on
+:11470 before driving playback** — a shell whose server landed on 11471+ will
+render fine but never stream.
+
+**MANDATORY pre-flight before any playback/click attempt** (learned the hard way —
+a shell was left with its server on :11472 while :11470 was empty, so every
+stream showed "no peers" and `http://127.0.0.1:11470/` returned `Error`, even
+though the UI rendered perfectly and clicks were the red herring):
+
+```sh
+ss -ltnp | grep ':11470'      # MUST show a `node … data/server.js` — else:
+pkill -9 -f 'data/server.js'; pkill -TERM -f stremio-linux-shell   # clear orphans
+# relaunch, then re-check :11470 before trying to play anything
+```
+
+Do not attempt to diagnose "playback won't start" (clicks, streams, seeds)
+until this check passes.
+
+## 19. FreezeOverlay validation + an mpv startup-crash fix found on the way
+
+### The startup crash that wasn't intermittent (fixed)
+
+After a system update to **libmpv 0.41.0**, the shell aborted at startup ~half the
+time with `Failed to create mpv: Raw(-11)` (`MPV_ERROR_PROPERTY_ERROR`). It looked
+intermittent, but it was **deterministic**: `Video::default` built the mpv
+`msg-level` as `format!("all={}", RUST_LOG)`. With a normal compound tracing
+filter — e.g. `RUST_LOG=freeze=debug,stremio_linux_shell=info` — mpv received
+`msg-level=all=freeze=debug,stremio_linux_shell=info`, which is not valid mpv
+grammar (levels are `no/fatal/error/warn/info/status/v/debug/trace`), so
+`mpv_initialize` rejected it and aborted. Every crash was a `RUST_LOG`-set launch;
+every success had it unset — alternating between the two *looked* like a coin flip.
+Fix: map `RUST_LOG` verbosity onto a valid mpv level instead of forwarding it
+(commit). Also hardened `Video::default` to set the runtime options
+(`video-sync`/`video-timing-offset`/`hwdec`) after init rather than inside the
+fragile `mpv_initialize`. Startups went from ~50% to reliable.
+
+### FreezeOverlay — validated
+
+- **Controlled bench (real Nvidia GTX 1060, 2560×1440, `GSK_RENDERER=gl`,
+  2026-07-19):** `BENCH_MODE=frozen` **21.6% / 59.9 fps** vs `BENCH_MODE=cairo`
+  **88.5% / 19.9 fps** — the `FreezeOverlay`, once frozen, contributes zero render
+  nodes and drops to the video-only floor: a ~4× CPU cut that also restores 60 fps.
+  See `BENCHMARKS.md`.
+- **Live pipeline confirmed** in the running shell (`RUST_LOG=freeze=debug`): the
+  injected `shell_ui` DOM observer posts visibility, it reaches the Rust handler,
+  and the freeze controller applies it — `shell_ui ui_visible=true` /
+  `apply frozen=false (playing=false ui_visible=true)` on the Board (fail-visible
+  default, correct off the player route).
+- **Unit test** `freeze_overlay_widget_contract` passes.
+
+### Remaining (needs a human, or working input automation)
+
+The only thing not directly observed is the CPU drop **in the live app during real
+playback** (controls auto-hide → `frozen=true` → floor). Driving the shell to a
+playing stream needs desktop input, and post-reboot the automation fell back to
+`ydotool`, whose absolute pointer positioning on this Wayland/KWin session is
+unreliable. The mechanism is nonetheless proven four ways (bench, code, unit test,
+live pipeline). To close it by hand: launch
+`RUST_LOG=freeze=debug … stremio-linux-shell`, play a 4K title, let the controls
+hide, and watch the log flip to `apply frozen=true` with app CPU dropping to the
+`none` floor; move the mouse and it returns to `frozen=false` instantly.
