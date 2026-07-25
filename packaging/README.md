@@ -152,6 +152,24 @@ Per release it builds the `.deb` in a container of that release, then in a
 Step 1 is the one that matters most: a `.deb` whose `Depends` name packages that
 do not exist is the failure mode this packaging has actually hit before.
 
+## Getting a CI-built .deb (without Docker or a release)
+
+To get correct, smoke-tested debs without building locally — and without cutting
+a release — trigger the Release workflow manually:
+
+```bash
+gh workflow run release.yml --repo <owner>/stremio-linux-shell --ref <branch>
+gh run download <run-id>          # after it finishes; debs are per-target artifacts
+```
+
+It builds one `.deb` per `releases.json` target, runs the same `verify-deb.sh`
+checks (TEST 1–8), and uploads each as a run artifact. The release-upload and
+flatpak jobs are skipped for manual runs — they only fire on a published release.
+
+Prefer this over a hand-built deb: a stale or wrong-branch `.deb` silently misses
+recent fixes (it is exactly how a build without the playback-CPU fix once got
+installed and looked like a regression).
+
 ## Versioning
 
 Packages are versioned `<upstream>-1~ubuntu<release>`, e.g.
