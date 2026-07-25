@@ -214,6 +214,17 @@ Also validated 2026-07-20: the resolute .deb installs and runs on an AMD/Ubuntu
 26.04 box — app launches, launcher stays silent (no NVIDIA warning), SERVER_PATH
 resolves, idle CPU ~0.5% of a core. (AMD/Intel path; NVIDIA path is Step 4.)
 
+Follow-up 2026-07-25 (beyond the original plan): `release.yml` gained a
+`workflow_dispatch` trigger so correct, smoke-tested debs can be built on demand
+(`gh workflow run release.yml` → `gh run download`) without cutting a release —
+the release-upload/flatpak jobs are gated to `release` events. Dispatched on
+`develop` and confirmed end-to-end: build-deb + smoke-test-deb passed for all
+three targets (first CI run of the 26.10 leg), and the downloaded resolute
+artifact contains the CPU fixes (`nvdec`/`auto-safe`). This exists because a
+stale, hand-built `1.1.2-1` deb (no fixes) was installed by mistake and looked
+like a regression — the dispatch path is now the supported way to get a
+test deb.
+
 ## Quick reference
 - Force a decode mode (support/debug): `STREMIO_HWDEC=nvdec|auto-safe|auto-copy|no`.
 - Confirm the mode actually used: mpv logs `Using hardware decoding (<mode>)` at
