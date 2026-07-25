@@ -3,6 +3,12 @@ name: Release
 on:
   release:
     types: [published]
+  # Manual trigger: build + smoke-test every target's .deb and upload them as
+  # run artifacts, without publishing to a GitHub Release. This is the supported
+  # way to get correct, CI-validated debs for testing (a stale hand-built deb is
+  # exactly what bit us before). The release-upload jobs are gated to `release`
+  # events below, so a dispatch run stops after build + smoke-test.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -144,8 +150,11 @@ jobs:
             bash /pkg/verify-deb.sh /deb
 
   # Only publish once every target has installed and run somewhere clean.
+  # Gated to real releases: a workflow_dispatch run has no release to attach to,
+  # so it stops after smoke-test-deb with the debs available as run artifacts.
   release-deb:
     needs: smoke-test-deb
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
       - name: Download all deb artifacts
@@ -163,7 +172,10 @@ jobs:
         with:
           files: ./dist/*.deb
 
+  # Also release-only: the flatpak is slow to build and uploads to the release,
+  # and a dispatch run is about producing debs for testing, not the flatpak.
   flatpak:
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     container:
       image: ubuntu:resolute
