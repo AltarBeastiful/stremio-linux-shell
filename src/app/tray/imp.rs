@@ -172,7 +172,7 @@ fn load_image(buffer: &[u8]) -> (Vec<u8>, u32, u32) {
     let (width, height) = image.dimensions();
     let mut data = image.into_raw();
 
-    for pixel in data.chunks_exact_mut(4) {
+    for pixel in data.as_chunks_mut::<4>().0 {
         pixel.rotate_right(1) // rgba to argb
     }
 
