@@ -108,9 +108,9 @@ recommends = "desktop-file-utils, hicolor-icon-theme"
 assets = [
     ["target/release/stremio-linux-shell", "/usr/libexec/stremio/stremio", "755"],
     ["data/server.js", "/usr/libexec/stremio/server.js", "644"],
-    ["data/stremio.sh", "/usr/bin/stremio", "755"],
-    ["data/com.stremio.Stremio.desktop", "/usr/share/applications/com.stremio.Stremio.desktop", "644"],
-    ["data/com.stremio.Stremio.service", "/usr/share/dbus-1/services/com.stremio.Stremio.service", "644"],
+    ["target/deb-stage/stremio", "/usr/bin/stremio", "755"],
+    ["target/deb-stage/com.stremio.Stremio.desktop", "/usr/share/applications/com.stremio.Stremio.desktop", "644"],
+    ["target/deb-stage/com.stremio.Stremio.service", "/usr/share/dbus-1/services/com.stremio.Stremio.service", "644"],
     ["data/com.stremio.Stremio.metainfo.xml", "/usr/share/metainfo/com.stremio.Stremio.metainfo.xml", "644"],
     ["data/com.stremio.Stremio.gschema.xml", "/usr/share/glib-2.0/schemas/com.stremio.Stremio.gschema.xml", "644"],
     ["data/icons/com.stremio.Stremio.svg", "/usr/share/icons/hicolor/scalable/apps/com.stremio.Stremio.svg", "644"],

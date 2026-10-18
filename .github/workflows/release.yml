@@ -89,6 +89,7 @@ jobs:
       # also keeps the canonical name_version_arch.deb layout apt expects.
       - name: Build deb package
         run: |
+          packaging/stage-deb-data.sh
           cargo deb --deb-revision "1~ubuntu${{ matrix.target.version }}" \
             -- --no-default-features --features ${{ matrix.target.feature }}
           ls -la target/debian/

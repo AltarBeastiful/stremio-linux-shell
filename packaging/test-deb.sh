@@ -69,6 +69,7 @@ for row in "${rows[@]}"; do
       # Build out-of-tree: /src is read-only so the host tree stays clean.
       # Exclude target/ and .git/ — copying them is gigabytes of pointless I/O.
       tar -C /src --exclude=./target --exclude=./.git -cf - . | tar -C /build -xf -
+      packaging/stage-deb-data.sh
       cargo deb --deb-revision "1~ubuntu${UBUNTU_VERSION}" \
         -- --no-default-features --features "${CARGO_FEATURE}"
       cp target/debian/*.deb /out/

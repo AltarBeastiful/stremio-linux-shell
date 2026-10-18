@@ -71,6 +71,7 @@ To build one locally for the release you are on:
 
 ```bash
 cargo install cargo-deb --locked
+packaging/stage-deb-data.sh
 # on 24.04; use --features api-4_22 and 1~ubuntu26.04 on 26.04
 cargo deb --deb-revision "1~ubuntu24.04" -- --no-default-features --features api-4_14
 sudo apt install ./target/debian/stremio_*.deb
