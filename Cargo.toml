@@ -22,7 +22,7 @@ offline-build = []
 # `default` and must not appear to depend on an Ubuntu release. The mapping from
 # a distribution release to one of these sets lives in packaging/releases.json,
 # which is also what drives the CI matrix. Several releases can share a set —
-# Ubuntu 26.10 (GTK 4.23) reuses api-4_22.
+# Ubuntu 26.10 (GTK 4.24) reuses api-4_22.
 #
 # Building with a higher set than a target ships compiles fine on a newer host
 # and then fails at runtime on that target, so a set must never exceed what the
@@ -31,6 +31,7 @@ offline-build = []
 # Verified against each release's archive on 2026-07-16:
 #   Ubuntu 24.04 LTS (noble)    GTK 4.14.5  libadwaita 1.5.0  WebKitGTK 2.52.3
 #   Ubuntu 26.04 LTS (resolute) GTK 4.22.4  libadwaita 1.9.0  WebKitGTK 2.52.3
+#   Ubuntu 26.10 (stonking)     GTK 4.24.1  libadwaita 1.10.0 WebKitGTK 2.52.6   (2026-10-19)
 #
 # There is deliberately no set below api-4_14. The crate cannot be built against
 # GTK older than 4.10 at any API level: `webkit6` references `gtk::Accessible`

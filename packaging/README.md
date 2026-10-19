@@ -26,6 +26,7 @@ safe lower bound.
 | --- | --- | --- | --- | --- |
 | noble 24.04 LTS | supported to 2029-05 | 4.14.5 | 1.5.0 | 2.52.3 |
 | resolute 26.04 LTS | supported to 2031-05 | 4.22.4 | 1.9.0 | 2.52.3 |
+| stonking 26.10 | supported to 2027-07 | 4.24.1 | 1.10.0 | 2.52.6 |
 
 Each target selects a Cargo feature set (`api-4_14`, `api-4_22`) pinning the
 GTK/libadwaita/WebKitGTK API levels to what that release actually ships.
@@ -36,7 +37,7 @@ The sets are named after API levels, not distributions: the crate has no opinion
 about Ubuntu, and the Flatpak builds with `default` features and should not
 appear to depend on an Ubuntu release. `releases.json` owns the
 release → API-set mapping, so several releases can share a set (Ubuntu 26.10
-ships GTK 4.23 and would reuse `api-4_22`) and a non-Ubuntu target can be added
+ships GTK 4.24 and reuses `api-4_22`) and a non-Ubuntu target can be added
 later without renaming anything.
 
 ### Deliberately excluded
@@ -55,13 +56,11 @@ No feature selection avoids this — it is in a dependency, not in our code.
 (Note jammy *does* ship `libwebkitgtk-6.0-dev` 2.50.4; the blocker is GTK, not
 WebKit.) jammy users are served by the Flatpak, which bundles its own runtime.
 
-**Interim releases** — as of 2026-07 every Ubuntu interim release is EOL:
+**Interim releases** — as of 2026-10 every interim release before 26.10 is EOL:
 oracular (24.10) EOL 2025-07 and its archive is gone entirely, plucky (25.04)
-EOL 2026-01, questing (25.10) EOL 2026-07-09. There is currently no supported
-interim release to target: 26.04 LTS shipped in April and 26.10 (stonking) does
-not release until 2026-10-15. stonking already builds cleanly (GTK 4.23.2,
-libadwaita 1.9.1, WebKitGTK 2.52.4) and can be added to `releases.json` when it
-ships.
+EOL 2026-01, questing (25.10) EOL 2026-07-09. stonking (26.10) released
+2026-10-15 and is targeted. Interim releases are supported for nine months, so
+drop its entry from `releases.json` when it goes EOL (2027-07).
 
 Re-check with `ubuntu-distro-info --supported` — do not assume.
 

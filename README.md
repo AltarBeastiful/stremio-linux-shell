@@ -60,7 +60,7 @@ flatpak run com.stremio.Stremio.Devel
 #### Debian package (.deb)
 A `.deb` is built and attached to every
 [release](https://github.com/Stremio/stremio-linux-shell/releases), one per supported Ubuntu
-release — currently **24.04 LTS (noble)** and **26.04 LTS (resolute)**. Pick the one matching your
+release — currently **24.04 LTS (noble)**, **26.04 LTS (resolute)** and **26.10 (stonking)**. Pick the one matching your
 release: they differ in which GTK/libadwaita/WebKitGTK versions they link against, and installing
 the wrong one will fail dependency resolution rather than misbehave silently.
 
@@ -77,7 +77,7 @@ cargo deb --deb-revision "1~ubuntu24.04" -- --no-default-features --features api
 sudo apt install ./target/debian/stremio_*.deb
 ```
 
-The feature set must match the GTK your release ships (`api-4_14` for 24.04, `api-4_22` for 26.04;
+The feature set must match the GTK your release ships (`api-4_14` for 24.04, `api-4_22` for 26.04 and 26.10;
 see `[features]` in `Cargo.toml` and the mapping in
 [`packaging/releases.json`](packaging/releases.json)). Building with a newer set than your system
 ships compiles fine and then fails at runtime.
